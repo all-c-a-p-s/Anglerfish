@@ -11,9 +11,7 @@ impl XorShiftU64 {
     const EXPLORATION: f64 = 0.05;
 
     pub fn new() -> Self {
-        Self {
-            state: (UNIX_EPOCH.elapsed().unwrap().as_nanos() % SEED) as u64,
-        }
+        Self { state: (UNIX_EPOCH.elapsed().unwrap().as_nanos() % SEED) as u64 }
     }
 
     pub fn next(&mut self) -> u64 {

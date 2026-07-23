@@ -216,10 +216,7 @@ impl CardSet {
         res
     }
 
-    pub const BLANK: Self = Self {
-        suit_masks: [0; 4],
-        rank_counts: [0; 13],
-    };
+    pub const BLANK: Self = Self { suit_masks: [0; 4], rank_counts: [0; 13] };
 
     const STRAIGHT_MASKS: [u16; 10] = Self::straight_masks();
 
@@ -323,9 +320,7 @@ impl CardSet {
             Self::QUADS_SCORE + Self::FIRST_SCORE * mx_idx as i32 + kicker as i32
         } else if mx == 3 && smx >= 2 {
             // full house
-            Self::FH_SCORE
-                + Self::FIRST_SCORE * (mx_idx as i32)
-                + Self::SECOND_SCORE * (smx_idx as i32)
+            Self::FH_SCORE + Self::FIRST_SCORE * (mx_idx as i32) + Self::SECOND_SCORE * (smx_idx as i32)
         } else if let Some(s) = flush_score {
             // flush
             s

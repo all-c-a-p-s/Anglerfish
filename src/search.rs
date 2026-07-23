@@ -31,11 +31,7 @@ impl Range {
             i += 1;
         });
 
-        Self {
-            probs,
-            equity_against_with_hand: 0.0,
-            equity_against_with_range: 0.0,
-        }
+        Self { probs, equity_against_with_hand: 0.0, equity_against_with_range: 0.0 }
     }
 
     pub const BLANK: Self = Self::no_information();
@@ -136,10 +132,7 @@ pub struct EvenActions {
 }
 
 impl EvenActions {
-    pub const BLANK: Self = Self {
-        probs: [0.2; 5],
-        children: None,
-    };
+    pub const BLANK: Self = Self { probs: [0.2; 5], children: None };
 }
 
 /// (2) Opponent's betting lead:
@@ -153,10 +146,7 @@ pub struct BehindActions {
 }
 
 impl BehindActions {
-    pub const BLANK: Self = Self {
-        probs: [1.0 / 3.0; 3],
-        children: None,
-    };
+    pub const BLANK: Self = Self { probs: [1.0 / 3.0; 3], children: None };
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -241,15 +231,7 @@ impl GameState {
             NodeType::BehindNode
         };
 
-        let mut base_root = Node::from(
-            self.chip_state,
-            self.turn,
-            nt,
-            false,
-            None,
-            self.sb_range,
-            self.bb_range,
-        );
+        let mut base_root = Node::from(self.chip_state, self.turn, nt, false, None, self.sb_range, self.bb_range);
 
         base_root.gen_subtree();
 
@@ -261,8 +243,7 @@ impl GameState {
 
             let public_seen = runout.seen;
 
-            let hero_seen =
-                public_seen | CARD_MASKS[self.hero_hand.0] | CARD_MASKS[self.hero_hand.1];
+            let hero_seen = public_seen | CARD_MASKS[self.hero_hand.0] | CARD_MASKS[self.hero_hand.1];
 
             match self.turn {
                 Position::SmallBlind => {
@@ -272,13 +253,11 @@ impl GameState {
                     runout_root.sb_range = runout.sb_range;
                     runout_root.bb_range = runout.bb_range;
 
-                    runout_root.bb_range.equity_against_with_hand = runout_root
-                        .bb_range
-                        .equity_against_with_hand(self.hero_hand, runout.board);
+                    runout_root.bb_range.equity_against_with_hand =
+                        runout_root.bb_range.equity_against_with_hand(self.hero_hand, runout.board);
 
-                    runout_root.bb_range.equity_against_with_range = runout_root
-                        .bb_range
-                        .equity_against_with_range(runout_root.sb_range, runout.board);
+                    runout_root.bb_range.equity_against_with_range =
+                        runout_root.bb_range.equity_against_with_range(runout_root.sb_range, runout.board);
                 }
 
                 Position::BigBlind => {
@@ -288,13 +267,11 @@ impl GameState {
                     runout_root.sb_range = runout.sb_range;
                     runout_root.bb_range = runout.bb_range;
 
-                    runout_root.sb_range.equity_against_with_hand = runout_root
-                        .sb_range
-                        .equity_against_with_hand(self.hero_hand, runout.board);
+                    runout_root.sb_range.equity_against_with_hand =
+                        runout_root.sb_range.equity_against_with_hand(self.hero_hand, runout.board);
 
-                    runout_root.sb_range.equity_against_with_range = runout_root
-                        .sb_range
-                        .equity_against_with_range(runout_root.bb_range, runout.board);
+                    runout_root.sb_range.equity_against_with_range =
+                        runout_root.sb_range.equity_against_with_range(runout_root.bb_range, runout.board);
                 }
             }
 
@@ -485,11 +462,7 @@ impl Node {
         let mut node = self;
 
         for choice in choices {
-            let player_ev = if node.position == root_position {
-                hero_pov_ev
-            } else {
-                villain_pov_ev
-            };
+            let player_ev = if node.position == root_position { hero_pov_ev } else { villain_pov_ev };
 
             let next_node = match node.actions.as_mut().unwrap() {
                 Actions::Even(actions) => {
@@ -564,16 +537,7 @@ impl Node {
             // AheadNode can only occur after opponent folded (terminal)
         };
 
-        Self {
-            terminal,
-            position,
-            node_type,
-            chip_state,
-            actions,
-            outcome,
-            sb_range,
-            bb_range,
-        }
+        Self { terminal, position, node_type, chip_state, actions, outcome, sb_range, bb_range }
     }
 
     fn successor(&self, action_idx: usize) -> Option<Self> {
@@ -635,26 +599,15 @@ impl Node {
             let mut ns = self.chip_state;
             ns.update_with(bet);
 
-            let mut r = Node::from(
-                ns,
-                self.position.next(),
-                NodeType::BehindNode,
-                false,
-                None,
-                self.sb_range,
-                self.bb_range,
-            );
+            let mut r =
+                Node::from(ns, self.position.next(), NodeType::BehindNode, false, None, self.sb_range, self.bb_range);
 
             r.gen_subtree();
             return Some(r);
         } else {
             let amount_behind = match self.position {
-                Position::SmallBlind => {
-                    self.chip_state.bb_this_street - self.chip_state.sb_this_street
-                }
-                Position::BigBlind => {
-                    self.chip_state.sb_this_street - self.chip_state.bb_this_street
-                }
+                Position::SmallBlind => self.chip_state.bb_this_street - self.chip_state.sb_this_street,
+                Position::BigBlind => self.chip_state.sb_this_street - self.chip_state.bb_this_street,
             };
 
             match action_idx {
@@ -719,11 +672,8 @@ impl Node {
                     let mut ns = self.chip_state;
                     ns.update_with(bet);
 
-                    let (terminal, outcome) = if amount <= amount_behind {
-                        (true, Some(Outcome::Showdown))
-                    } else {
-                        (false, None)
-                    };
+                    let (terminal, outcome) =
+                        if amount <= amount_behind { (true, Some(Outcome::Showdown)) } else { (false, None) };
 
                     let mut r = Node::from(
                         ns,
@@ -751,9 +701,7 @@ impl Node {
 
         match self.node_type {
             NodeType::BehindNode => {
-                let children = (0..3)
-                    .map(|i| Box::new(self.successor(i).unwrap()))
-                    .collect::<Vec<_>>();
+                let children = (0..3).map(|i| Box::new(self.successor(i).unwrap())).collect::<Vec<_>>();
 
                 let mut actions = BehindActions::BLANK;
                 actions.children = Some(children.try_into().unwrap());
@@ -761,9 +709,7 @@ impl Node {
                 self.actions = Some(Actions::Behind(actions));
             }
             NodeType::EvenNode => {
-                let children = (0..5)
-                    .map(|i| Box::new(self.successor(i).unwrap()))
-                    .collect::<Vec<_>>();
+                let children = (0..5).map(|i| Box::new(self.successor(i).unwrap())).collect::<Vec<_>>();
                 let mut actions = EvenActions::BLANK;
                 actions.children = Some(children.try_into().unwrap());
 

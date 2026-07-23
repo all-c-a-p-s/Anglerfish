@@ -6,14 +6,7 @@ use crate::game::*;
 use crate::search::*;
 
 fn main() {
-    let cs = ChipState {
-        pot: 3,
-        sb_stack: 99,
-        bb_stack: 98,
-        sb_this_street: 1,
-        bb_this_street: 2,
-        max_bet: 2,
-    };
+    let cs = ChipState { pot: 3, sb_stack: 99, bb_stack: 98, sb_this_street: 1, bb_this_street: 2, max_bet: 2 };
 
     let first_card = Card::new(Rank::Nine, Suit::Diamonds);
     let second_card = Card::new(Rank::Ten, Suit::Diamonds);
@@ -34,9 +27,7 @@ fn main() {
 
     let n = gs.do_runouts();
 
-    let Some(actions) = n.actions else {
-        unreachable!()
-    };
+    let Some(actions) = n.actions else { unreachable!() };
 
     match actions {
         Actions::Even(a) => {

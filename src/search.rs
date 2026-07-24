@@ -1,4 +1,4 @@
-use crate::game::{CARD_MASKS, CARDS, Card, CardSet, ChipState, GameState, cfor};
+use crate::game::{CARD_MASKS, CARDS, Card, CardSet, ChipState, GameState, Hand, cfor};
 use crate::rng::XorShiftU64;
 use std::cmp::Ordering;
 
@@ -259,11 +259,16 @@ fn update_probs<const N: usize>(probs: &mut [f64; N], choice: usize, player_ev: 
     }
 }
 
+pub enum HandPolicies {
+    Even([[[f64; 5]; Card::NUM]; Card::NUM]),
+    Behind([[[f64; 4]; Card::NUM]; Card::NUM]),
+}
+
 const NUM_RUNOUTS: usize = 1024;
 const NUM_PLAYOUTS: usize = 1024;
 const LR: f64 = 1.0 / NUM_PLAYOUTS as f64;
 
-const RANGE_CALC_RUNOUTS: usize = 100;
+const RANGE_CALC_RUNOUTS: usize = 10;
 
 impl GameState {
     pub fn do_runouts(&self) -> Node {
@@ -278,12 +283,13 @@ impl GameState {
         let mut base_root = Node::from(self.chip_state, self.turn, nt, false, None, self.sb_range, self.bb_range);
 
         base_root.gen_subtree();
+        base_root.update_subtree_ranges(self.board, self.seen, self.hero_hand, self.board_len);
 
         let mut averaged_root = base_root.policy_zeroed();
 
         for _ in 0..NUM_RUNOUTS {
             let mut runout_root = base_root.clone();
-            let mut runout = self.gen_runout();
+            let runout = self.gen_runout();
 
             let hero_mask = CARD_MASKS[self.hero_hand.0] | CARD_MASKS[self.hero_hand.1];
 
@@ -292,37 +298,7 @@ impl GameState {
 
             let cache = ScoreCache::from_board(runout.board);
 
-            match self.turn {
-                Position::SmallBlind => {
-                    runout.sb_range.update_from_seen(public_seen);
-                    runout.bb_range.update_from_seen(hero_seen);
-
-                    runout_root.sb_range = runout.sb_range;
-                    runout_root.bb_range = runout.bb_range;
-
-                    let equities = runout_root.bb_range.equity_table(&cache);
-
-                    runout_root.bb_range.equity_against_with_hand = equities[self.hero_hand.0][self.hero_hand.1];
-
-                    runout_root.bb_range.equity_against_with_range =
-                        runout_root.bb_range.equity_against_with_range(runout_root.sb_range, &equities);
-                }
-
-                Position::BigBlind => {
-                    runout.sb_range.update_from_seen(hero_seen);
-                    runout.bb_range.update_from_seen(public_seen);
-
-                    runout_root.sb_range = runout.sb_range;
-                    runout_root.bb_range = runout.bb_range;
-
-                    let equities = runout_root.sb_range.equity_table(&cache);
-
-                    runout_root.sb_range.equity_against_with_hand = equities[self.hero_hand.0][self.hero_hand.1];
-
-                    runout_root.sb_range.equity_against_with_range =
-                        runout_root.sb_range.equity_against_with_range(runout_root.bb_range, &equities);
-                }
-            }
+            runout_root.update_terminal_equities(self.turn, self.hero_hand, public_seen, hero_seen, &cache);
 
             for _ in 0..NUM_PLAYOUTS {
                 runout_root.playout_from_root(&mut rng);
@@ -335,16 +311,16 @@ impl GameState {
         averaged_root
     }
 
-    pub fn update_ranges_with_decision(&mut self, decision_idx: usize) {
-        let nt = if self.chip_state.sb_this_street == self.chip_state.bb_this_street {
-            NodeType::EvenNode
-        } else {
-            NodeType::BehindNode
-        };
-
+    fn hand_policies_for<const N: usize>(
+        &self,
+        node_type: NodeType,
+        get_probs: impl Fn(&Actions) -> [f64; N],
+    ) -> [[[f64; N]; Card::NUM]; Card::NUM] {
         let mut rng = XorShiftU64::new();
 
-        let mut base_root = Node::from(self.chip_state, self.turn, nt, false, None, self.sb_range, self.bb_range);
+        let mut base_root =
+            Node::from(self.chip_state, self.turn, node_type, false, None, self.sb_range, self.bb_range);
+
         base_root.gen_subtree();
 
         let acting_range = match self.turn {
@@ -352,10 +328,10 @@ impl GameState {
             Position::BigBlind => self.bb_range,
         };
 
-        let mut likelihood_sums = [[0.0; Card::NUM]; Card::NUM];
+        let mut policy_sums = [[[0.0; N]; Card::NUM]; Card::NUM];
         let mut runout_counts = [[0; Card::NUM]; Card::NUM];
 
-        let mut public_state = self.clone();
+        let mut public_state = *self;
         public_state.remove_hero_hand();
 
         for _ in 0..RANGE_CALC_RUNOUTS {
@@ -397,33 +373,60 @@ impl GameState {
                     runout_root.sb_range = runout.sb_range;
                     runout_root.bb_range = runout.bb_range;
 
-                    match self.turn {
-                        Position::SmallBlind => {
-                            runout_root.bb_range.equity_against_with_hand = equities[c1][c2];
-                            runout_root.bb_range.equity_against_with_range = range_equity;
-                        }
-
-                        Position::BigBlind => {
-                            runout_root.sb_range.equity_against_with_hand = equities[c1][c2];
-                            runout_root.sb_range.equity_against_with_range = range_equity;
-                        }
-                    }
+                    runout_root.set_terminal_equities(self.turn, equities[c1][c2], range_equity);
 
                     for _ in 0..NUM_PLAYOUTS {
                         runout_root.playout_from_root(&mut rng);
                     }
 
-                    let likelihood = match runout_root.actions.as_ref().unwrap() {
-                        Actions::Even(actions) => actions.probs[decision_idx],
-                        Actions::Behind(actions) => actions.probs[decision_idx],
-                    };
+                    let probs = get_probs(runout_root.actions.as_ref().unwrap());
 
-                    likelihood_sums[c1][c2] += likelihood;
+                    for action_idx in 0..N {
+                        policy_sums[c1][c2][action_idx] += probs[action_idx];
+                    }
+
                     runout_counts[c1][c2] += 1;
                 }
             }
         }
 
+        for c1 in CARDS {
+            for c2 in CARDS {
+                let count = runout_counts[c1][c2];
+
+                if count == 0 {
+                    continue;
+                }
+
+                for action_idx in 0..N {
+                    policy_sums[c1][c2][action_idx] /= count as f64;
+                }
+            }
+        }
+
+        policy_sums
+    }
+
+    fn hand_policies(&self) -> HandPolicies {
+        if self.chip_state.sb_this_street == self.chip_state.bb_this_street {
+            HandPolicies::Even(self.hand_policies_for::<5>(NodeType::EvenNode, |actions| match actions {
+                Actions::Even(actions) => actions.probs,
+                Actions::Behind(_) => unreachable!(),
+            }))
+        } else {
+            HandPolicies::Behind(self.hand_policies_for::<4>(NodeType::BehindNode, |actions| match actions {
+                Actions::Behind(actions) => actions.probs,
+                Actions::Even(_) => unreachable!(),
+            }))
+        }
+    }
+
+    pub fn update_ranges_with_decision(&mut self, decision_idx: usize) {
+        let policies = self.hand_policies();
+        self.update_ranges_with_policies(decision_idx, &policies);
+    }
+
+    pub fn update_ranges_with_policies(&mut self, decision_idx: usize, policies: &HandPolicies) {
         let range = match self.turn {
             Position::SmallBlind => &mut self.sb_range,
             Position::BigBlind => &mut self.bb_range,
@@ -437,14 +440,10 @@ impl GameState {
                     continue;
                 }
 
-                let count = runout_counts[c1][c2];
-
-                if count == 0 {
-                    range.probs[c1][c2] = 0.0;
-                    continue;
-                }
-
-                let likelihood = likelihood_sums[c1][c2] / count as f64;
+                let likelihood = match &policies {
+                    HandPolicies::Even(policies) => policies[c1][c2][decision_idx],
+                    HandPolicies::Behind(policies) => policies[c1][c2][decision_idx],
+                };
 
                 range.probs[c1][c2] *= likelihood;
                 total += range.probs[c1][c2];
@@ -576,6 +575,161 @@ impl Node {
         }
     }
 
+    fn update_subtree_ranges(&mut self, board: CardSet, seen: u64, hero_hand: Hand, board_len: u8) {
+        if self.terminal {
+            return;
+        }
+
+        let state = GameState {
+            chip_state: self.chip_state,
+            turn: self.position,
+            board,
+            hero_hand,
+            sb_range: self.sb_range,
+            bb_range: self.bb_range,
+            seen,
+            board_len,
+        };
+
+        let policies = state.hand_policies();
+
+        match self.actions.as_mut().unwrap() {
+            Actions::Even(actions) => {
+                let children = actions.children.as_mut().unwrap();
+
+                for decision_idx in 0..5 {
+                    let mut child_state = state;
+                    child_state.update_ranges_with_policies(decision_idx, &policies);
+
+                    let child = children[decision_idx].as_mut();
+                    child.sb_range = child_state.sb_range;
+                    child.bb_range = child_state.bb_range;
+
+                    child.update_subtree_ranges(board, seen, hero_hand, board_len);
+                }
+            }
+
+            Actions::Behind(actions) => {
+                let children = actions.children.as_mut().unwrap();
+
+                for decision_idx in 0..4 {
+                    let mut child_state = state;
+                    child_state.update_ranges_with_policies(decision_idx, &policies);
+
+                    let child = children[decision_idx].as_mut();
+                    child.sb_range = child_state.sb_range;
+                    child.bb_range = child_state.bb_range;
+
+                    child.update_subtree_ranges(board, seen, hero_hand, board_len);
+                }
+            }
+        }
+    }
+
+    fn set_terminal_equities(&mut self, root_position: Position, hero_equity: f64, range_equity: f64) {
+        if self.terminal {
+            if matches!(self.outcome, Some(Outcome::Showdown)) {
+                match root_position {
+                    Position::SmallBlind => {
+                        self.bb_range.equity_against_with_hand = hero_equity;
+                        self.bb_range.equity_against_with_range = range_equity;
+                    }
+
+                    Position::BigBlind => {
+                        self.sb_range.equity_against_with_hand = hero_equity;
+                        self.sb_range.equity_against_with_range = range_equity;
+                    }
+                }
+            }
+
+            return;
+        }
+
+        match self.actions.as_mut().unwrap() {
+            Actions::Even(actions) => {
+                for child in actions.children.as_mut().unwrap() {
+                    child.set_terminal_equities(root_position, hero_equity, range_equity);
+                }
+            }
+
+            Actions::Behind(actions) => {
+                for child in actions.children.as_mut().unwrap() {
+                    child.set_terminal_equities(root_position, hero_equity, range_equity);
+                }
+            }
+        }
+    }
+
+    fn update_terminal_equities(
+        &mut self,
+        root_position: Position,
+        hero_hand: Hand,
+        public_seen: u64,
+        hero_seen: u64,
+        cache: &ScoreCache,
+    ) {
+        if self.terminal {
+            if !matches!(self.outcome, Some(Outcome::Showdown)) {
+                return;
+            }
+
+            match root_position {
+                Position::SmallBlind => {
+                    self.sb_range.update_from_seen(public_seen);
+                    self.bb_range.update_from_seen(hero_seen);
+
+                    let equities = self.bb_range.equity_table(cache);
+
+                    self.bb_range.equity_against_with_hand = equities[hero_hand.0][hero_hand.1];
+
+                    self.bb_range.equity_against_with_range =
+                        self.bb_range.equity_against_with_range(self.sb_range, &equities);
+                }
+
+                Position::BigBlind => {
+                    self.sb_range.update_from_seen(hero_seen);
+                    self.bb_range.update_from_seen(public_seen);
+
+                    let equities = self.sb_range.equity_table(cache);
+
+                    self.sb_range.equity_against_with_hand = equities[hero_hand.0][hero_hand.1];
+
+                    self.sb_range.equity_against_with_range =
+                        self.sb_range.equity_against_with_range(self.bb_range, &equities);
+                }
+            }
+
+            return;
+        }
+
+        match self.actions.as_mut().unwrap() {
+            Actions::Even(actions) => {
+                for child in actions.children.as_mut().unwrap() {
+                    child.update_terminal_equities(root_position, hero_hand, public_seen, hero_seen, cache);
+                }
+            }
+
+            Actions::Behind(actions) => {
+                for child in actions.children.as_mut().unwrap() {
+                    child.update_terminal_equities(root_position, hero_hand, public_seen, hero_seen, cache);
+                }
+            }
+        }
+    }
+
+    fn node_at_path(&self, choices: &[usize]) -> &Node {
+        let mut node = self;
+
+        for &choice in choices {
+            node = match node.actions.as_ref().unwrap() {
+                Actions::Even(actions) => actions.children.as_ref().unwrap()[choice].as_ref(),
+                Actions::Behind(actions) => actions.children.as_ref().unwrap()[choice].as_ref(),
+            };
+        }
+
+        node
+    }
+
     fn playout_from_root(&mut self, rng: &mut XorShiftU64) {
         let root_position = self.position;
         let starting_stack = match root_position {
@@ -585,27 +739,26 @@ impl Node {
 
         let (choices, result, outcome) = self.playout(rng);
 
+        let (hero_equity, range_equity) = {
+            let terminal = self.node_at_path(&choices);
+
+            match root_position {
+                Position::SmallBlind => {
+                    (terminal.bb_range.equity_against_with_hand, terminal.bb_range.equity_against_with_range)
+                }
+
+                Position::BigBlind => {
+                    (terminal.sb_range.equity_against_with_hand, terminal.sb_range.equity_against_with_range)
+                }
+            }
+        };
+
         let final_stack_hero_pov = match (root_position, outcome) {
-            // hero is SB and reaches showdown
-            (Position::SmallBlind, Outcome::Showdown) => {
-                result.sb_stack as f64 + result.pot as f64 * self.bb_range.equity_against_with_hand
-            }
-
-            // hero is BB and reaches showdown
-            (Position::BigBlind, Outcome::Showdown) => {
-                result.bb_stack as f64 + result.pot as f64 * self.sb_range.equity_against_with_hand
-            }
-
-            // BB folded -> hero in SB wins pot
+            (Position::SmallBlind, Outcome::Showdown) => result.sb_stack as f64 + result.pot as f64 * hero_equity,
+            (Position::BigBlind, Outcome::Showdown) => result.bb_stack as f64 + result.pot as f64 * hero_equity,
             (Position::SmallBlind, Outcome::BBFolded) => result.sb_stack as f64 + result.pot as f64,
-
-            // hero in BB folded -> SB wins pot
             (Position::BigBlind, Outcome::BBFolded) => result.bb_stack as f64,
-
-            // hero in SB folded -> BB wins pot
             (Position::SmallBlind, Outcome::SBFolded) => result.sb_stack as f64,
-
-            // SB folded -> hero in BB wins pot
             (Position::BigBlind, Outcome::SBFolded) => result.bb_stack as f64 + result.pot as f64,
         };
 
@@ -618,19 +771,14 @@ impl Node {
 
         let villain_final_stack = match (root_position, outcome) {
             (Position::SmallBlind, Outcome::Showdown) => {
-                result.bb_stack as f64 + result.pot as f64 * (1.0 - self.bb_range.equity_against_with_range)
+                result.bb_stack as f64 + result.pot as f64 * (1.0 - range_equity)
             }
-
             (Position::BigBlind, Outcome::Showdown) => {
-                result.sb_stack as f64 + result.pot as f64 * (1.0 - self.sb_range.equity_against_with_range)
+                result.sb_stack as f64 + result.pot as f64 * (1.0 - range_equity)
             }
-
             (Position::SmallBlind, Outcome::BBFolded) => result.bb_stack as f64,
-
             (Position::SmallBlind, Outcome::SBFolded) => result.bb_stack as f64 + result.pot as f64,
-
             (Position::BigBlind, Outcome::BBFolded) => result.sb_stack as f64 + result.pot as f64,
-
             (Position::BigBlind, Outcome::SBFolded) => result.sb_stack as f64,
         };
 

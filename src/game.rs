@@ -278,7 +278,7 @@ impl CardSet {
     const TOP_2: [u16; Self::MASKS_TOTAL] = Self::TABLES.3;
     const TOP: [u16; Self::MASKS_TOTAL] = Self::TABLES.4;
 
-    fn score(&self) -> i32 {
+    pub fn score(&self) -> i32 {
         let mut flush_score = None;
 
         let all = self.suit_masks[Suit::Hearts]
@@ -408,6 +408,7 @@ pub struct GameState {
     pub sb_range: Range,
     pub bb_range: Range,
     pub seen: u64,
+    pub board_len: u8,
 }
 
 pub const CARD_MASKS: [u64; Card::NUM] = {
@@ -425,13 +426,29 @@ pub const CARD_MASKS: [u64; Card::NUM] = {
 };
 
 impl GameState {
+    pub fn set_hero_hand(&mut self, hand: Hand) {
+        self.seen &= !CARD_MASKS[self.hero_hand.0];
+        self.seen &= !CARD_MASKS[self.hero_hand.1];
+
+        self.hero_hand = hand;
+
+        self.seen |= CARD_MASKS[hand.0];
+        self.seen |= CARD_MASKS[hand.1];
+    }
+
+    pub fn remove_hero_hand(&mut self) {
+        self.seen &= !CARD_MASKS[self.hero_hand.0];
+        self.seen &= !CARD_MASKS[self.hero_hand.1];
+    }
+
     pub fn gen_runout(&self) -> GameState {
-        let mut res = self.clone();
+        let mut res = *self;
         let mut rng = XorShiftU64::new();
 
-        while res.seen.count_ones() < 5 {
+        while res.board_len < 5 {
             let next_card = rng.next_card(&mut res.seen);
             res.board.update_with(next_card);
+            res.board_len += 1;
         }
 
         res

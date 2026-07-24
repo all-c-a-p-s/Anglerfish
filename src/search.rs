@@ -30,6 +30,11 @@ pub struct ScoreCache {
     sorted_hands: Vec<Hand>,
 }
 
+struct CachedRunout {
+    public_seen: u64,
+    cache: ScoreCache,
+}
+
 impl ScoreCache {
     pub const BLANK: Self = Self { scores: [[None; Card::NUM]; Card::NUM], sorted_hands: Vec::new() };
 
@@ -349,7 +354,6 @@ enum NodePolicyStats {
 #[derive(Default)]
 struct HandPolicyState {
     stats: HashMap<usize, NodePolicyStats>,
-    count: usize,
 }
 
 impl HandPolicyState {
@@ -494,6 +498,19 @@ impl GameState {
         }
     }
 
+    fn cached_runouts(&self, count: usize) -> Vec<CachedRunout> {
+        let mut public_state = *self;
+        public_state.remove_hero_hand();
+
+        (0..count)
+            .map(|_| {
+                let runout = public_state.gen_runout();
+
+                CachedRunout { public_seen: runout.seen, cache: ScoreCache::from_board(runout.board) }
+            })
+            .collect()
+    }
+
     pub fn do_runouts(&self) -> Node {
         let nt = if self.chip_state.sb_this_street == self.chip_state.bb_this_street {
             NodeType::EvenNode
@@ -509,8 +526,8 @@ impl GameState {
             nt,
             false,
             None,
-            self.sb_range,
-            self.bb_range,
+            Rc::new(self.sb_range),
+            Rc::new(self.bb_range),
             self.streets_remaining(),
             self.actions_this_street(),
         );
@@ -519,8 +536,17 @@ impl GameState {
         println!("INFO generated game tree");
         println!("INFO node count {}", root.node_count());
 
+        let cached_runouts = self.cached_runouts(NUM_PLAYOUTS);
+
         for pass_idx in 0..NUM_RANGE_PASSES {
-            root.update_subtree_ranges(self.board, self.seen, self.hero_hand, self.board_len, RANGE_UPDATE_DEPTH);
+            root.update_subtree_ranges(
+                self.board,
+                self.seen,
+                self.hero_hand,
+                self.board_len,
+                RANGE_UPDATE_DEPTH,
+                &cached_runouts,
+            );
 
             println!("INFO completed range pass {}/{}", pass_idx + 1, NUM_RANGE_PASSES,);
 
@@ -544,6 +570,7 @@ impl GameState {
     fn hand_policies_for<const N: usize>(
         &self,
         base_root: &Node,
+        cached_runouts: &[CachedRunout],
         get_probs: impl Fn(&Node, &HandPolicyState) -> [f64; N],
     ) -> [[[f64; N]; Card::NUM]; Card::NUM] {
         let mut rng = XorShiftU64::new();
@@ -577,21 +604,11 @@ impl GameState {
         for batch in hands.chunks(HAND_BATCH_SIZE) {
             let mut states = batch.iter().copied().map(|hand| (hand, HandPolicyState::default())).collect::<Vec<_>>();
 
-            while states.iter().any(|(_, state)| state.count < NUM_PLAYOUTS) {
-                let mut runout = public_state.gen_runout();
-                let public_seen = runout.seen;
-
-                runout.sb_range.update_from_seen(public_seen);
-                runout.bb_range.update_from_seen(public_seen);
-
-                let cache = ScoreCache::from_board(runout.board);
+            for runout in cached_runouts {
+                let public_seen = runout.public_seen;
                 let mut terminal_equities = Vec::new();
 
                 for (hand, state) in &mut states {
-                    if state.count >= NUM_PLAYOUTS {
-                        continue;
-                    }
-
                     let hand_mask = CARD_MASKS[hand.0] | CARD_MASKS[hand.1];
 
                     if public_seen & hand_mask != 0 {
@@ -608,7 +625,7 @@ impl GameState {
                             None => {
                                 let terminal = base_root.node_at_path(&choices);
                                 let (equities, range_equity) =
-                                    terminal.equity_table_for_runout(self.turn, public_seen, &cache);
+                                    terminal.equity_table_for_runout(self.turn, public_seen, &runout.cache);
 
                                 terminal_equities.push((choices.clone(), equities, range_equity));
                                 terminal_equities.len() - 1
@@ -629,8 +646,6 @@ impl GameState {
                         hero_equity,
                         range_equity,
                     );
-
-                    state.count += 1;
                 }
             }
 
@@ -642,14 +657,18 @@ impl GameState {
         policies
     }
 
-    fn hand_policies_from_root(&self, root: &Node) -> HandPolicies {
+    fn hand_policies_from_root(&self, root: &Node, cached_runouts: &[CachedRunout]) -> HandPolicies {
         match root.node_type {
             NodeType::EvenNode => {
-                HandPolicies::Even(self.hand_policies_for::<5>(root, |node, state| state.even_probs(node)))
+                HandPolicies::Even(
+                    self.hand_policies_for::<5>(root, cached_runouts, |node, state| state.even_probs(node)),
+                )
             }
 
             NodeType::BehindNode => {
-                HandPolicies::Behind(self.hand_policies_for::<4>(root, |node, state| state.behind_probs(node)))
+                HandPolicies::Behind(
+                    self.hand_policies_for::<4>(root, cached_runouts, |node, state| state.behind_probs(node)),
+                )
             }
 
             NodeType::AheadNode => unreachable!(),
@@ -669,15 +688,16 @@ impl GameState {
             node_type,
             false,
             None,
-            self.sb_range,
-            self.bb_range,
+            Rc::new(self.sb_range),
+            Rc::new(self.bb_range),
             self.streets_remaining(),
             self.actions_this_street(),
         );
 
         root.gen_subtree();
 
-        self.hand_policies_from_root(&root)
+        let cached_runouts = self.cached_runouts(NUM_PLAYOUTS);
+        self.hand_policies_from_root(&root, &cached_runouts)
     }
 
     pub fn update_ranges_with_decision(&mut self, decision_idx: usize) {
@@ -995,7 +1015,15 @@ impl Node {
         }
     }
 
-    fn update_subtree_ranges(&mut self, board: CardSet, seen: u64, hero_hand: Hand, board_len: u8, depth: usize) {
+    fn update_subtree_ranges(
+        &mut self,
+        board: CardSet,
+        seen: u64,
+        hero_hand: Hand,
+        board_len: u8,
+        depth: usize,
+        cached_runouts: &[CachedRunout],
+    ) {
         if self.terminal || depth == 0 {
             return;
         }
@@ -1011,7 +1039,7 @@ impl Node {
             board_len,
         };
 
-        let policies = state.hand_policies_from_root(self);
+        let policies = state.hand_policies_from_root(self, cached_runouts);
 
         match self.actions.as_mut().unwrap() {
             Actions::Even(actions) => {
@@ -1029,7 +1057,7 @@ impl Node {
                     child.sb_range = Rc::new(child_state.sb_range);
                     child.bb_range = Rc::new(child_state.bb_range);
 
-                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1);
+                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1, cached_runouts);
                 }
             }
 
@@ -1048,7 +1076,7 @@ impl Node {
                     child.sb_range = Rc::new(child_state.sb_range);
                     child.bb_range = Rc::new(child_state.bb_range);
 
-                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1);
+                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1, cached_runouts);
                 }
             }
         }
@@ -1232,8 +1260,8 @@ impl Node {
         node_type: NodeType,
         terminal: bool,
         outcome: Option<Outcome>,
-        sb_range: Range,
-        bb_range: Range,
+        sb_range: Rc<Range>,
+        bb_range: Rc<Range>,
         streets_remaining: u8,
         actions_this_street: u8,
     ) -> Self {
@@ -1252,8 +1280,8 @@ impl Node {
             chip_state,
             actions,
             outcome,
-            sb_range: Rc::new(sb_range),
-            bb_range: Rc::new(bb_range),
+            sb_range,
+            bb_range,
             streets_remaining,
             actions_this_street,
         }
@@ -1267,8 +1295,8 @@ impl Node {
                 NodeType::EvenNode,
                 true,
                 Some(Outcome::Showdown),
-                *self.sb_range,
-                *self.bb_range,
+                Rc::clone(&self.sb_range),
+                Rc::clone(&self.bb_range),
                 self.streets_remaining,
                 self.actions_this_street,
             )
@@ -1283,8 +1311,8 @@ impl Node {
                 NodeType::EvenNode,
                 false,
                 None,
-                *self.sb_range,
-                *self.bb_range,
+                Rc::clone(&self.sb_range),
+                Rc::clone(&self.bb_range),
                 self.streets_remaining - 1,
                 0,
             )
@@ -1301,8 +1329,8 @@ impl Node {
                 NodeType::EvenNode,
                 false,
                 None,
-                *self.sb_range,
-                *self.bb_range,
+                Rc::clone(&self.sb_range),
+                Rc::clone(&self.bb_range),
                 self.streets_remaining,
                 1,
             )
@@ -1331,8 +1359,8 @@ impl Node {
                         NodeType::EvenNode,
                         false,
                         None,
-                        *self.sb_range,
-                        *self.bb_range,
+                        Rc::clone(&self.sb_range),
+                        Rc::clone(&self.bb_range),
                         self.streets_remaining,
                         1,
                     )
@@ -1366,8 +1394,8 @@ impl Node {
                 NodeType::BehindNode,
                 false,
                 None,
-                *self.sb_range,
-                *self.bb_range,
+                Rc::clone(&self.sb_range),
+                Rc::clone(&self.bb_range),
                 self.streets_remaining,
                 self.actions_this_street + 1,
             );
@@ -1392,8 +1420,8 @@ impl Node {
                         NodeType::AheadNode,
                         true,
                         Some(outcome),
-                        *self.sb_range,
-                        *self.bb_range,
+                        Rc::clone(&self.sb_range),
+                        Rc::clone(&self.bb_range),
                         self.streets_remaining,
                         self.actions_this_street,
                     );
@@ -1448,8 +1476,8 @@ impl Node {
                             NodeType::BehindNode,
                             false,
                             None,
-                            *self.sb_range,
-                            *self.bb_range,
+                            Rc::clone(&self.sb_range),
+                            Rc::clone(&self.bb_range),
                             self.streets_remaining,
                             self.actions_this_street + 1,
                         )
@@ -1477,8 +1505,8 @@ impl Node {
                             NodeType::BehindNode,
                             false,
                             None,
-                            *self.sb_range,
-                            *self.bb_range,
+                            Rc::clone(&self.sb_range),
+                            Rc::clone(&self.bb_range),
                             self.streets_remaining,
                             self.actions_this_street + 1,
                         )

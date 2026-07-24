@@ -2,6 +2,8 @@ pub mod game;
 pub mod rng;
 pub mod search;
 
+use std::time::Instant;
+
 use crate::game::*;
 use crate::search::*;
 
@@ -33,7 +35,11 @@ fn main() {
 
     game_state.set_hero_hand(hand);
 
+    let start = Instant::now();
+
     let root = game_state.do_runouts();
+
+    println!("{:?}", start.elapsed());
 
     match root.actions.as_ref().unwrap() {
         Actions::Even(actions) => {

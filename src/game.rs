@@ -25,7 +25,7 @@ pub type Hand = (Card, Card);
 
 /// About the derive(Ord):
 /// obviously all suits are equal; this is not used for comparing showdown value
-#[derive(PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Debug)]
 pub enum Suit {
     Hearts,
     Diamonds,
@@ -51,7 +51,7 @@ impl<T> IndexMut<Suit> for [T; 4] {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 pub enum Rank {
     Two,
     Three,
@@ -86,7 +86,7 @@ impl<T> IndexMut<Rank> for [T; 13] {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Debug)]
 pub struct Card {
     rank: Rank,
     suit: Suit,

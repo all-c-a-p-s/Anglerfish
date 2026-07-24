@@ -5,16 +5,20 @@ pub mod search;
 use crate::game::*;
 use crate::search::*;
 
+#[allow(unused)]
 fn main() {
-    let mut cs = ChipState { pot: 3, sb_stack: 99, bb_stack: 98, sb_this_street: 1, bb_this_street: 2, max_bet: 2 };
+    let cs = ChipState { pot: 3, sb_stack: 99, bb_stack: 98, sb_this_street: 1, bb_this_street: 2, max_bet: 2 };
 
     let aa = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::Ace, Suit::Hearts));
     let aks = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Spades));
     let ako = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Hearts));
+    let tt = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Ten, Suit::Hearts));
+    let dd = (Card::new(Rank::Two, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
     let sdo = (Card::new(Rank::Seven, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
     let t9s = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Nine, Suit::Spades));
 
-    let hand = t9s;
+    let hand = tt;
+    dbg!(hand.0, hand.1);
 
     let mut gs = GameState {
         chip_state: cs,
@@ -33,50 +37,49 @@ fn main() {
 
     let Some(actions) = n.actions else { unreachable!() };
 
-    match actions {
-        Actions::Even(a) => {
-            dbg!(a.probs);
+    match &actions {
+        Actions::Even(root_actions) => {
+            dbg!(root_actions.probs);
+            dbg!(root_actions.visits);
+            dbg!(root_actions.total_ev);
+
+            let after_jam = root_actions.children.as_ref().unwrap()[4].as_ref();
+
+            let Actions::Behind(response_actions) = after_jam.actions.as_ref().unwrap() else {
+                unreachable!();
+            };
+
+            dbg!(response_actions.probs);
+            dbg!(response_actions.total_ev);
+            dbg!(response_actions.visits);
+
+            let fold_probability = response_actions.probs[0];
+            let call_probability = response_actions.probs[1];
+
+            dbg!(fold_probability);
+            dbg!(call_probability);
         }
-        Actions::Behind(a) => {
-            dbg!(a.probs);
-        }
-    }
 
-    println!("BEFORE:");
+        Actions::Behind(root_actions) => {
+            dbg!(root_actions.probs);
+            dbg!(root_actions.visits);
+            dbg!(root_actions.total_ev);
 
-    println!("AA:  {}", gs.sb_range.probs[aa.0][aa.1] + gs.sb_range.probs[aa.1][aa.0]);
-    println!("AKs: {}", gs.sb_range.probs[aks.0][aks.1] + gs.sb_range.probs[aks.1][aks.0]);
-    println!("AKo: {}", gs.sb_range.probs[ako.0][ako.1] + gs.sb_range.probs[ako.1][ako.0]);
-    println!("72o: {}", gs.sb_range.probs[sdo.0][sdo.1] + gs.sb_range.probs[sdo.1][sdo.0]);
-    println!("T9s: {}", gs.sb_range.probs[t9s.0][t9s.1] + gs.sb_range.probs[t9s.1][t9s.0]);
+            let after_jam = root_actions.children.as_ref().unwrap()[3].as_ref();
 
-    gs.update_ranges_with_decision(3);
+            let Actions::Behind(response_actions) = after_jam.actions.as_ref().unwrap() else {
+                unreachable!();
+            };
 
-    println!("AFTER:");
+            dbg!(response_actions.probs);
+            dbg!(response_actions.total_ev);
+            dbg!(response_actions.visits);
 
-    println!("AA:  {}", gs.sb_range.probs[aa.0][aa.1] + gs.sb_range.probs[aa.1][aa.0]);
-    println!("AKs: {}", gs.sb_range.probs[aks.0][aks.1] + gs.sb_range.probs[aks.1][aks.0]);
-    println!("AKo: {}", gs.sb_range.probs[ako.0][ako.1] + gs.sb_range.probs[ako.1][ako.0]);
-    println!("72o: {}", gs.sb_range.probs[sdo.0][sdo.1] + gs.sb_range.probs[sdo.1][sdo.0]);
-    println!("T9s: {}", gs.sb_range.probs[t9s.0][t9s.1] + gs.sb_range.probs[t9s.1][t9s.0]);
+            let fold_probability = response_actions.probs[0];
+            let call_probability = response_actions.probs[1];
 
-    cs = ChipState { pot: 102, sb_stack: 0, bb_stack: 98, sb_this_street: 100, bb_this_street: 2, max_bet: 100 };
-
-    gs.chip_state = cs;
-    gs.turn = Position::BigBlind;
-
-    gs.set_hero_hand(sdo);
-
-    let n = gs.do_runouts();
-
-    let Some(actions) = n.actions else { unreachable!() };
-
-    match actions {
-        Actions::Even(a) => {
-            dbg!(a.probs);
-        }
-        Actions::Behind(a) => {
-            dbg!(a.probs);
+            dbg!(fold_probability);
+            dbg!(call_probability);
         }
     }
 }

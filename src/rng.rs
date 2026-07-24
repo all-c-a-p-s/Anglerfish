@@ -8,7 +8,7 @@ pub struct XorShiftU64 {
 const SEED: u128 = 0xF8D1C463A579BE02;
 
 impl XorShiftU64 {
-    const EXPLORATION: f64 = 0.05;
+    const EXPLORATION: f64 = 1.0;
 
     pub fn new() -> Self {
         Self { state: (UNIX_EPOCH.elapsed().unwrap().as_nanos() % SEED) as u64 }
@@ -61,12 +61,21 @@ impl XorShiftU64 {
         h as f64 / MX as f64
     }
 
-    pub fn explore_action(&mut self, ps: &[f64]) -> usize {
+    pub fn explore_action(&mut self, ps: &[f64], legal: &[bool]) -> usize {
+        assert_eq!(ps.len(), legal.len());
+
         let n = ps.len();
+        let legal_count = legal.iter().filter(|&&x| x).count();
+
         let mut pref = vec![0.0; n + 1];
 
         for i in 1..=n {
-            let p = (1.0 - Self::EXPLORATION) * ps[i - 1] + Self::EXPLORATION / n as f64;
+            let p = if legal[i - 1] {
+                (1.0 - Self::EXPLORATION) * ps[i - 1] + Self::EXPLORATION / legal_count as f64
+            } else {
+                0.0
+            };
+
             pref[i] = pref[i - 1] + p;
         }
 
@@ -77,7 +86,7 @@ impl XorShiftU64 {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
 
-            if pref[mid] >= r {
+            if r < pref[mid] {
                 hi = mid;
             } else {
                 lo = mid + 1;

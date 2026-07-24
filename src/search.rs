@@ -286,9 +286,12 @@ impl ChipState {
     }
 }
 
-const TEMPERATURE: f64 = 1.0;
+const POLICY_TEMPERATURE: f64 = 5.0;
+const RANGE_TEMPERATURE: f64 = 1.0;
 
-fn softmax<const N: usize>(values: &[f64; N], legal: &[bool; N]) -> [f64; N] {
+fn softmax<const N: usize, const RANGE_CALC: bool>(values: &[f64; N], legal: &[bool; N]) -> [f64; N] {
+    let temperature = if RANGE_CALC { RANGE_TEMPERATURE } else { POLICY_TEMPERATURE };
+
     let max_value = (0..N).filter(|&i| legal[i]).map(|i| values[i]).fold(f64::NEG_INFINITY, f64::max);
 
     let mut probs = [0.0; N];
@@ -296,7 +299,7 @@ fn softmax<const N: usize>(values: &[f64; N], legal: &[bool; N]) -> [f64; N] {
 
     for i in 0..N {
         if legal[i] {
-            probs[i] = ((values[i] - max_value) / TEMPERATURE).exp();
+            probs[i] = ((values[i] - max_value) / temperature).exp();
             total += probs[i];
         }
     }
@@ -308,7 +311,7 @@ fn softmax<const N: usize>(values: &[f64; N], legal: &[bool; N]) -> [f64; N] {
     probs
 }
 
-fn update_probs<const N: usize>(
+fn update_probs<const N: usize, const RANGE_CALC: bool>(
     probs: &mut [f64; N],
     total_ev: &mut [f64; N],
     visits: &mut [u32; N],
@@ -329,7 +332,7 @@ fn update_probs<const N: usize>(
         }
     }
 
-    *probs = softmax(&mean_ev, legal);
+    *probs = softmax::<N, RANGE_CALC>(&mean_ev, legal);
 }
 
 pub enum HandPolicies {
@@ -375,10 +378,10 @@ impl HandPolicyState {
 
 const RANGE_UPDATE_DEPTH: usize = 2;
 
-const NUM_PLAYOUTS: usize = 100;
+const NUM_PLAYOUTS: usize = 256;
 const HAND_COUNT: usize = Card::NUM * (Card::NUM - 1) / 2;
 const HAND_BATCH_SIZE: usize = HAND_COUNT;
-const NUM_RANGE_PASSES: usize = 10;
+const NUM_RANGE_PASSES: usize = 4;
 
 fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_runouts: usize) {
     const NUM_SHOWN: usize = 10;
@@ -514,7 +517,7 @@ impl GameState {
 
         root.gen_subtree();
         println!("INFO generated game tree");
-        dbg!(root.node_count());
+        println!("INFO node count {}", root.node_count());
 
         for pass_idx in 0..NUM_RANGE_PASSES {
             root.update_subtree_ranges(self.board, self.seen, self.hero_hand, self.board_len, RANGE_UPDATE_DEPTH);
@@ -964,7 +967,7 @@ impl Node {
 
             let next_node = match node.actions.as_mut().unwrap() {
                 Actions::Even(actions) => {
-                    update_probs(
+                    update_probs::<_, false>(
                         &mut actions.probs,
                         &mut actions.total_ev,
                         &mut actions.visits,
@@ -976,7 +979,7 @@ impl Node {
                 }
 
                 Actions::Behind(actions) => {
-                    update_probs(
+                    update_probs::<_, false>(
                         &mut actions.probs,
                         &mut actions.total_ev,
                         &mut actions.visits,
@@ -1165,7 +1168,7 @@ impl Node {
                         unreachable!();
                     };
 
-                    update_probs(probs, total_ev, visits, &actions.legal, choice, player_ev);
+                    update_probs::<_, true>(probs, total_ev, visits, &actions.legal, choice, player_ev);
                     node = actions.children.as_ref().unwrap()[choice].as_ref();
                 }
 
@@ -1180,7 +1183,7 @@ impl Node {
                         unreachable!();
                     };
 
-                    update_probs(probs, total_ev, visits, &actions.legal, choice, player_ev);
+                    update_probs::<_, true>(probs, total_ev, visits, &actions.legal, choice, player_ev);
                     node = actions.children.as_ref().unwrap()[choice].as_ref();
                 }
             }
@@ -1509,7 +1512,7 @@ impl Node {
 
                 let mut actions = BehindActions::BLANK;
                 actions.legal = legal;
-                actions.probs = softmax(&actions.total_ev, &actions.legal);
+                actions.probs = softmax::<_, false>(&actions.total_ev, &actions.legal);
                 actions.children = Some(children);
 
                 self.actions = Some(Actions::Behind(actions));
@@ -1529,7 +1532,7 @@ impl Node {
 
                 let mut actions = EvenActions::BLANK;
                 actions.legal = legal;
-                actions.probs = softmax(&actions.total_ev, &actions.legal);
+                actions.probs = softmax::<_, false>(&actions.total_ev, &actions.legal);
                 actions.children = Some(children);
 
                 self.actions = Some(Actions::Even(actions));

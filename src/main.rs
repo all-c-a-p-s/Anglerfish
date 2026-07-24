@@ -17,7 +17,7 @@ fn main() {
     let sdo = (Card::new(Rank::Seven, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
     let t9s = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Nine, Suit::Spades));
 
-    let hand = tt;
+    let hand = aks;
     dbg!(hand.0, hand.1);
 
     let mut game_state = GameState {

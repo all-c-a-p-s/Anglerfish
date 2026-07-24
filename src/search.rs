@@ -273,6 +273,8 @@ impl GameState {
             NodeType::BehindNode
         };
 
+        let mut rng = XorShiftU64::new();
+
         let mut base_root = Node::from(self.chip_state, self.turn, nt, false, None, self.sb_range, self.bb_range);
 
         base_root.gen_subtree();
@@ -323,7 +325,7 @@ impl GameState {
             }
 
             for _ in 0..NUM_PLAYOUTS {
-                runout_root.playout_from_root();
+                runout_root.playout_from_root(&mut rng);
             }
 
             averaged_root.add_policy_from(&runout_root);
@@ -339,6 +341,8 @@ impl GameState {
         } else {
             NodeType::BehindNode
         };
+
+        let mut rng = XorShiftU64::new();
 
         let mut base_root = Node::from(self.chip_state, self.turn, nt, false, None, self.sb_range, self.bb_range);
         base_root.gen_subtree();
@@ -406,7 +410,7 @@ impl GameState {
                     }
 
                     for _ in 0..NUM_PLAYOUTS {
-                        runout_root.playout_from_root();
+                        runout_root.playout_from_root(&mut rng);
                     }
 
                     let likelihood = match runout_root.actions.as_ref().unwrap() {
@@ -572,14 +576,14 @@ impl Node {
         }
     }
 
-    fn playout_from_root(&mut self) {
+    fn playout_from_root(&mut self, rng: &mut XorShiftU64) {
         let root_position = self.position;
         let starting_stack = match root_position {
             Position::SmallBlind => self.chip_state.sb_stack as f64,
             Position::BigBlind => self.chip_state.bb_stack as f64,
         };
 
-        let (choices, result, outcome) = self.playout();
+        let (choices, result, outcome) = self.playout(rng);
 
         let final_stack_hero_pov = match (root_position, outcome) {
             // hero is SB and reaches showdown
@@ -655,12 +659,10 @@ impl Node {
         }
     }
 
-    fn playout(&self) -> (Vec<usize>, ChipState, Outcome) {
+    fn playout(&self, rng: &mut XorShiftU64) -> (Vec<usize>, ChipState, Outcome) {
         if self.terminal {
             return (vec![], self.chip_state, self.outcome.unwrap());
         }
-
-        let mut rng = XorShiftU64::new();
 
         let Some(actions) = self.actions.as_ref() else {
             unreachable!();
@@ -670,7 +672,7 @@ impl Node {
             Actions::Even(a) => {
                 let choice = rng.explore_action(&a.probs);
 
-                let (choices, chip_state, outcome) = a.children.as_ref().unwrap()[choice].playout();
+                let (choices, chip_state, outcome) = a.children.as_ref().unwrap()[choice].playout(rng);
 
                 let mut path = Vec::with_capacity(choices.len() + 1);
                 path.push(choice);
@@ -682,7 +684,7 @@ impl Node {
             Actions::Behind(a) => {
                 let choice = rng.explore_action(&a.probs);
 
-                let (choices, chip_state, outcome) = a.children.as_ref().unwrap()[choice].playout();
+                let (choices, chip_state, outcome) = a.children.as_ref().unwrap()[choice].playout(rng);
 
                 let mut path = Vec::with_capacity(choices.len() + 1);
                 path.push(choice);

@@ -453,4 +453,14 @@ impl GameState {
 
         res
     }
+
+    pub fn streets_remaining(&self) -> u8 {
+        match self.board_len {
+            0 => 4,
+            3 => 3,
+            4 => 2,
+            5 => 1,
+            _ => unreachable!(),
+        }
+    }
 }

@@ -1,6 +1,7 @@
-use crate::game::{CARD_MASKS, CARDS, Card, CardSet, ChipState, GameState, Hand, cfor};
+use crate::game::{CARD_MASKS, CARDS, Card, CardSet, ChipState, GameState, Hand, Rank, Suit, cfor};
 use crate::rng::XorShiftU64;
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -10,8 +11,10 @@ pub struct Node {
     pub chip_state: ChipState,
     pub actions: Option<Actions>,
     pub outcome: Option<Outcome>,
-    pub sb_range: Range,
-    pub bb_range: Range,
+    pub sb_range: Rc<Range>,
+    pub bb_range: Rc<Range>,
+    pub streets_remaining: u8,
+    pub actions_this_street: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -282,7 +285,7 @@ impl ChipState {
     }
 }
 
-const TEMPERATURE: f64 = 25.0;
+const TEMPERATURE: f64 = 10.0;
 
 fn softmax<const N: usize>(values: &[f64; N], legal: &[bool; N]) -> [f64; N] {
     let max_value = (0..N).filter(|&i| legal[i]).map(|i| values[i]).fold(f64::NEG_INFINITY, f64::max);
@@ -333,12 +336,94 @@ pub enum HandPolicies {
     Behind([[[f64; 4]; Card::NUM]; Card::NUM]),
 }
 
-const NUM_PLAYOUTS: usize = 100;
+const RANGE_UPDATE_DEPTH: usize = 2;
+
+const NUM_PLAYOUTS: usize = 10;
 const HAND_COUNT: usize = Card::NUM * (Card::NUM - 1) / 2;
-const HAND_BATCH_SIZE: usize = HAND_COUNT;
-const NUM_RANGE_PASSES: usize = 5;
+const NUM_RANGE_PASSES: usize = 10;
+
+fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_runouts: usize) {
+    let uniform_probability = 1.0 / HAND_COUNT as f64;
+
+    let aa = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::Ace, Suit::Hearts));
+    let aks = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Spades));
+    let ako = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Hearts));
+    let tt = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Ten, Suit::Hearts));
+    let dd = (Card::new(Rank::Two, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
+    let sdo = (Card::new(Rank::Seven, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
+    let t9s = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Nine, Suit::Spades));
+
+    let interesting_hands =
+        [("AA", aa), ("AKs", aks), ("AKo", ako), ("TT", tt), ("22", dd), ("72o", sdo), ("T9s", t9s)];
+
+    let mut probabilities = Vec::new();
+    let mut entropy = 0.0;
+    let mut total_probability = 0.0;
+    let mut nonzero = 0usize;
+
+    for c1 in CARDS {
+        for c2 in CARDS {
+            if c1 <= c2 {
+                continue;
+            }
+
+            let probability = range.probs[c1][c2];
+
+            if probability > 0.0 {
+                nonzero += 1;
+                total_probability += probability;
+                entropy -= probability * probability.ln();
+                probabilities.push(probability);
+            }
+        }
+    }
+
+    probabilities.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap());
+
+    let mass_in_top = |n: usize| -> f64 { probabilities.iter().take(n).sum() };
+
+    let equity_vs_random = state.range_equity_vs_random(*range, equity_runouts);
+
+    println!("\n========== {name} ==========");
+    println!("Total probability:       {total_probability:.10}");
+    println!("Nonzero combinations:    {nonzero}");
+    println!("Effective combinations:  {:.2}", entropy.exp());
+    println!("Equity vs random hand:    {:.2}%", 100.0 * equity_vs_random);
+    println!("Top 10 mass:              {:.2}%", 100.0 * mass_in_top(10));
+    println!("Top 50 mass:              {:.2}%", 100.0 * mass_in_top(50));
+    println!("Top 100 mass:             {:.2}%", 100.0 * mass_in_top(100));
+
+    println!("\nSelected hands:");
+
+    for &(label, hand) in &interesting_hands {
+        let (c1, c2) = if hand.0 > hand.1 { (hand.0, hand.1) } else { (hand.1, hand.0) };
+
+        let probability = range.probs[c1][c2];
+
+        println!("{label:>4}: {probability:.10} ({:>6.3}x uniform)", probability / uniform_probability,);
+    }
+}
 
 impl GameState {
+    fn actions_this_street(&self) -> u8 {
+        if self.board_len == 0
+            && self.turn == Position::SmallBlind
+            && self.chip_state.sb_this_street == 1
+            && self.chip_state.bb_this_street == 2
+        {
+            0
+        } else if self.chip_state.sb_this_street != self.chip_state.bb_this_street {
+            1
+        } else {
+            match (self.board_len, self.turn) {
+                (0, Position::BigBlind) => 1,
+                (0, Position::SmallBlind) => 0,
+                (_, Position::SmallBlind) => 1,
+                (_, Position::BigBlind) => 0,
+            }
+        }
+    }
+
     pub fn do_runouts(&self) -> Node {
         let nt = if self.chip_state.sb_this_street == self.chip_state.bb_this_street {
             NodeType::EvenNode
@@ -348,13 +433,28 @@ impl GameState {
 
         let mut rng = XorShiftU64::new();
 
-        let mut root = Node::from(self.chip_state, self.turn, nt, false, None, self.sb_range, self.bb_range);
+        let mut root = Node::from(
+            self.chip_state,
+            self.turn,
+            nt,
+            false,
+            None,
+            self.sb_range,
+            self.bb_range,
+            self.streets_remaining(),
+            self.actions_this_street(),
+        );
 
         root.gen_subtree();
+        println!("INFO generated game tree");
+        dbg!(root.node_count());
 
         for pass_idx in 0..NUM_RANGE_PASSES {
-            root.update_subtree_ranges(self.board, self.seen, self.hero_hand, self.board_len);
-            println!("INFO completed range pass {}/{}", pass_idx + 1, NUM_RANGE_PASSES);
+            root.update_subtree_ranges(self.board, self.seen, self.hero_hand, self.board_len, RANGE_UPDATE_DEPTH);
+
+            println!("INFO completed range pass {}/{}", pass_idx + 1, NUM_RANGE_PASSES,);
+
+            root.inspect_jam_ranges_after_pass(self, pass_idx + 1);
         }
 
         for _ in 0..NUM_PLAYOUTS {
@@ -404,64 +504,50 @@ impl GameState {
             }
         }
 
-        for batch in hands.chunks(HAND_BATCH_SIZE) {
-            let mut roots = batch.iter().copied().map(|hand| (hand, base_root.clone(), 0usize)).collect::<Vec<_>>();
+        let mut working_root = base_root.clone();
 
-            while roots.iter().any(|(_, _, count)| *count < NUM_PLAYOUTS) {
+        for hand in hands {
+            let mut count = 0usize;
+
+            let mut visited_paths = Vec::with_capacity(NUM_PLAYOUTS);
+
+            while count < NUM_PLAYOUTS {
                 let mut runout = public_state.gen_runout();
                 let public_seen = runout.seen;
+
+                let hand_mask = CARD_MASKS[hand.0] | CARD_MASKS[hand.1];
+
+                if public_seen & hand_mask != 0 {
+                    continue;
+                }
 
                 runout.sb_range.update_from_seen(public_seen);
                 runout.bb_range.update_from_seen(public_seen);
 
-                let cache = ScoreCache::from_board(runout.board);
-                let mut terminal_equities = Vec::new();
+                let (choices, result, outcome) = working_root.playout(&mut rng);
 
-                for (hand, root, count) in &mut roots {
-                    if *count >= NUM_PLAYOUTS {
-                        continue;
-                    }
+                let (hero_equity, range_equity) = if matches!(outcome, Outcome::Showdown) {
+                    let cache = ScoreCache::from_board(runout.board);
+                    let terminal = base_root.node_at_path(&choices);
 
-                    let hand_mask = CARD_MASKS[hand.0] | CARD_MASKS[hand.1];
+                    let (equities, range_equity) = terminal.equity_table_for_runout(self.turn, public_seen, &cache);
 
-                    if public_seen & hand_mask != 0 {
-                        continue;
-                    }
+                    (equities[hand.0][hand.1], range_equity)
+                } else {
+                    (0.0, 0.0)
+                };
 
-                    let (choices, result, outcome) = root.playout(&mut rng);
+                visited_paths.push(choices.clone());
 
-                    let (hero_equity, range_equity) = if matches!(outcome, Outcome::Showdown) {
-                        let cache_idx = terminal_equities.iter().position(|(path, _, _)| path == &choices);
+                working_root.apply_playout_result(choices, result, outcome, hero_equity, range_equity);
 
-                        let cache_idx = match cache_idx {
-                            Some(i) => i,
-
-                            None => {
-                                let terminal = base_root.node_at_path(&choices);
-
-                                let (equities, range_equity) =
-                                    terminal.equity_table_for_runout(self.turn, public_seen, &cache);
-
-                                terminal_equities.push((choices.clone(), equities, range_equity));
-                                terminal_equities.len() - 1
-                            }
-                        };
-
-                        let (_, equities, range_equity) = &terminal_equities[cache_idx];
-
-                        (equities[hand.0][hand.1], *range_equity)
-                    } else {
-                        (0.0, 0.0)
-                    };
-
-                    root.apply_playout_result(choices, result, outcome, hero_equity, range_equity);
-
-                    *count += 1;
-                }
+                count += 1;
             }
 
-            for (hand, root, _) in roots {
-                policies[hand.0][hand.1] = get_probs(root.actions.as_ref().unwrap());
+            policies[hand.0][hand.1] = get_probs(working_root.actions.as_ref().unwrap());
+
+            for path in &visited_paths {
+                working_root.reset_policy_path_from(base_root, path);
             }
         }
 
@@ -491,7 +577,17 @@ impl GameState {
             NodeType::BehindNode
         };
 
-        let mut root = Node::from(self.chip_state, self.turn, node_type, false, None, self.sb_range, self.bb_range);
+        let mut root = Node::from(
+            self.chip_state,
+            self.turn,
+            node_type,
+            false,
+            None,
+            self.sb_range,
+            self.bb_range,
+            self.streets_remaining(),
+            self.actions_this_street(),
+        );
 
         root.gen_subtree();
 
@@ -539,6 +635,34 @@ impl GameState {
             }
         }
     }
+
+    pub fn range_equity_vs_random(&self, range: Range, num_runouts: usize) -> f64 {
+        let mut public_state = *self;
+        public_state.remove_hero_hand();
+
+        let mut equity_sum = 0.0;
+
+        for _ in 0..num_runouts {
+            let runout = public_state.gen_runout();
+            let public_seen = runout.seen;
+
+            let mut our_range = range;
+            let mut random_range = Range::BLANK;
+
+            our_range.update_from_seen(public_seen);
+            random_range.update_from_seen(public_seen);
+
+            let cache = ScoreCache::from_board(runout.board);
+
+            let equities = random_range.equity_table(&cache);
+
+            let range_equity = random_range.equity_against_with_range(our_range, &equities);
+
+            equity_sum += range_equity;
+        }
+
+        equity_sum / num_runouts as f64
+    }
 }
 
 impl Node {
@@ -551,7 +675,59 @@ impl Node {
             && a.chip_state.sb_this_street == b.chip_state.sb_this_street
             && a.chip_state.bb_this_street == b.chip_state.bb_this_street
             && a.chip_state.max_bet == b.chip_state.max_bet
-            && (a.terminal || (a.position == b.position && a.node_type == b.node_type))
+            && (a.terminal
+                || (a.position == b.position
+                    && a.node_type == b.node_type
+                    && a.streets_remaining == b.streets_remaining
+                    && a.actions_this_street == b.actions_this_street))
+    }
+
+    pub fn node_count(&self) -> usize {
+        let children = match self.actions.as_ref() {
+            None => 0,
+
+            Some(Actions::Even(actions)) => actions
+                .children
+                .as_ref()
+                .unwrap()
+                .iter()
+                .zip(actions.legal)
+                .filter(|(_, legal)| *legal)
+                .map(|(child, _)| child.node_count())
+                .sum(),
+
+            Some(Actions::Behind(actions)) => actions
+                .children
+                .as_ref()
+                .unwrap()
+                .iter()
+                .zip(actions.legal)
+                .filter(|(_, legal)| *legal)
+                .map(|(child, _)| child.node_count())
+                .sum(),
+        };
+
+        1 + children
+    }
+
+    fn inspect_jam_ranges_after_pass(&self, state: &GameState, pass_number: usize) {
+        let after_jam = match self.actions.as_ref().unwrap() {
+            Actions::Even(actions) => actions.children.as_ref().unwrap()[4].as_ref(),
+
+            Actions::Behind(actions) => actions.children.as_ref().unwrap()[3].as_ref(),
+        };
+
+        println!("\n\n################ RANGE PASS {pass_number} ################");
+
+        inspect_range_summary("SB jamming range", state, after_jam.sb_range.as_ref(), 100);
+
+        let Actions::Behind(response_actions) = after_jam.actions.as_ref().unwrap() else {
+            unreachable!("Opponent should be facing the jam");
+        };
+
+        let after_call = response_actions.children.as_ref().unwrap()[1].as_ref();
+
+        inspect_range_summary("BB call-after-jam range", state, after_call.bb_range.as_ref(), 100);
     }
 
     fn distinct_actions<const N: usize>(children: &[Box<Node>; N]) -> [bool; N] {
@@ -577,8 +753,8 @@ impl Node {
         hero_seen: u64,
         cache: &ScoreCache,
     ) -> (f64, f64) {
-        let mut sb_range = self.sb_range;
-        let mut bb_range = self.bb_range;
+        let mut sb_range = *self.sb_range;
+        let mut bb_range = *self.bb_range;
 
         match root_position {
             Position::SmallBlind => {
@@ -607,8 +783,8 @@ impl Node {
         public_seen: u64,
         cache: &ScoreCache,
     ) -> ([[f64; Card::NUM]; Card::NUM], f64) {
-        let mut sb_range = self.sb_range;
-        let mut bb_range = self.bb_range;
+        let mut sb_range = *self.sb_range;
+        let mut bb_range = *self.bb_range;
 
         sb_range.update_from_seen(public_seen);
         bb_range.update_from_seen(public_seen);
@@ -733,8 +909,8 @@ impl Node {
         }
     }
 
-    fn update_subtree_ranges(&mut self, board: CardSet, seen: u64, hero_hand: Hand, board_len: u8) {
-        if self.terminal {
+    fn update_subtree_ranges(&mut self, board: CardSet, seen: u64, hero_hand: Hand, board_len: u8, depth: usize) {
+        if self.terminal || depth == 0 {
             return;
         }
 
@@ -743,8 +919,8 @@ impl Node {
             turn: self.position,
             board,
             hero_hand,
-            sb_range: self.sb_range,
-            bb_range: self.bb_range,
+            sb_range: *self.sb_range,
+            bb_range: *self.bb_range,
             seen,
             board_len,
         };
@@ -764,10 +940,10 @@ impl Node {
                     child_state.update_ranges_with_policies(decision_idx, &policies);
 
                     let child = children[decision_idx].as_mut();
-                    child.sb_range = child_state.sb_range;
-                    child.bb_range = child_state.bb_range;
+                    child.sb_range = Rc::new(child_state.sb_range);
+                    child.bb_range = Rc::new(child_state.bb_range);
 
-                    child.update_subtree_ranges(board, seen, hero_hand, board_len);
+                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1);
                 }
             }
 
@@ -783,10 +959,10 @@ impl Node {
                     child_state.update_ranges_with_policies(decision_idx, &policies);
 
                     let child = children[decision_idx].as_mut();
-                    child.sb_range = child_state.sb_range;
-                    child.bb_range = child_state.bb_range;
+                    child.sb_range = Rc::new(child_state.sb_range);
+                    child.bb_range = Rc::new(child_state.bb_range);
 
-                    child.update_subtree_ranges(board, seen, hero_hand, board_len);
+                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1);
                 }
             }
         }
@@ -803,6 +979,49 @@ impl Node {
         }
 
         node
+    }
+
+    fn copy_policy_stats_from(&mut self, source: &Node) {
+        match (&mut self.actions, &source.actions) {
+            (Some(Actions::Even(dst)), Some(Actions::Even(src))) => {
+                dst.probs = src.probs;
+                dst.total_ev = src.total_ev;
+                dst.visits = src.visits;
+            }
+
+            (Some(Actions::Behind(dst)), Some(Actions::Behind(src))) => {
+                dst.probs = src.probs;
+                dst.total_ev = src.total_ev;
+                dst.visits = src.visits;
+            }
+
+            (None, None) => {}
+
+            _ => unreachable!(),
+        }
+    }
+
+    fn reset_policy_path_from(&mut self, source_root: &Node, path: &[usize]) {
+        let mut dst = self;
+        let mut src = source_root;
+
+        dst.copy_policy_stats_from(src);
+
+        for &choice in path {
+            dst = match dst.actions.as_mut().unwrap() {
+                Actions::Even(actions) => actions.children.as_mut().unwrap()[choice].as_mut(),
+
+                Actions::Behind(actions) => actions.children.as_mut().unwrap()[choice].as_mut(),
+            };
+
+            src = match src.actions.as_ref().unwrap() {
+                Actions::Even(actions) => actions.children.as_ref().unwrap()[choice].as_ref(),
+
+                Actions::Behind(actions) => actions.children.as_ref().unwrap()[choice].as_ref(),
+            };
+
+            dst.copy_policy_stats_from(src);
+        }
     }
 
     fn playout(&self, rng: &mut XorShiftU64) -> (Vec<usize>, ChipState, Outcome) {
@@ -849,6 +1068,8 @@ impl Node {
         outcome: Option<Outcome>,
         sb_range: Range,
         bb_range: Range,
+        streets_remaining: u8,
+        actions_this_street: u8,
     ) -> Self {
         let actions = match (terminal, node_type) {
             (true, _) => None,
@@ -858,7 +1079,68 @@ impl Node {
             // AheadNode can only occur after opponent folded (terminal)
         };
 
-        Self { terminal, position, node_type, chip_state, actions, outcome, sb_range, bb_range }
+        Self {
+            terminal,
+            position,
+            node_type,
+            chip_state,
+            actions,
+            outcome,
+            sb_range: Rc::new(sb_range),
+            bb_range: Rc::new(bb_range),
+            streets_remaining,
+            actions_this_street,
+        }
+    }
+
+    fn close_betting_round(&self, mut chip_state: ChipState) -> Self {
+        if chip_state.sb_stack == 0 || chip_state.bb_stack == 0 || self.streets_remaining == 1 {
+            Node::from(
+                chip_state,
+                self.position.next(),
+                NodeType::EvenNode,
+                true,
+                Some(Outcome::Showdown),
+                *self.sb_range,
+                *self.bb_range,
+                self.streets_remaining,
+                self.actions_this_street,
+            )
+        } else {
+            chip_state.sb_this_street = 0;
+            chip_state.bb_this_street = 0;
+            chip_state.max_bet = 0;
+
+            Node::from(
+                chip_state,
+                Position::BigBlind,
+                NodeType::EvenNode,
+                false,
+                None,
+                *self.sb_range,
+                *self.bb_range,
+                self.streets_remaining - 1,
+                0,
+            )
+        }
+    }
+
+    fn call_successor(&self, chip_state: ChipState) -> Self {
+        if chip_state.sb_stack == 0 || chip_state.bb_stack == 0 || self.actions_this_street > 0 {
+            self.close_betting_round(chip_state)
+        } else {
+            Node::from(
+                chip_state,
+                self.position.next(),
+                NodeType::EvenNode,
+                false,
+                None,
+                *self.sb_range,
+                *self.bb_range,
+                self.streets_remaining,
+                1,
+            )
+        }
     }
 
     fn successor(&self, action_idx: usize) -> Option<Self> {
@@ -874,30 +1156,22 @@ impl Node {
         if self.node_type == NodeType::EvenNode {
             if action_idx == 0 {
                 //check
-                let mut r = match self.position {
-                    // opponent just checked
-                    Position::SmallBlind => Node::from(
+                let r = if self.actions_this_street > 0 {
+                    self.close_betting_round(self.chip_state)
+                } else {
+                    Node::from(
                         self.chip_state,
-                        Position::BigBlind,
-                        NodeType::EvenNode,
-                        true,
-                        Some(Outcome::Showdown),
-                        self.sb_range,
-                        self.bb_range,
-                    ),
-
-                    Position::BigBlind => Node::from(
-                        self.chip_state,
-                        Position::SmallBlind,
+                        self.position.next(),
                         NodeType::EvenNode,
                         false,
                         None,
-                        self.sb_range,
-                        self.bb_range,
-                    ),
+                        *self.sb_range,
+                        *self.bb_range,
+                        self.streets_remaining,
+                        1,
+                    )
                 };
 
-                r.gen_subtree();
                 return Some(r);
             }
 
@@ -920,10 +1194,18 @@ impl Node {
             let mut ns = self.chip_state;
             ns.update_with(bet);
 
-            let mut r =
-                Node::from(ns, self.position.next(), NodeType::BehindNode, false, None, self.sb_range, self.bb_range);
+            let r = Node::from(
+                ns,
+                self.position.next(),
+                NodeType::BehindNode,
+                false,
+                None,
+                *self.sb_range,
+                *self.bb_range,
+                self.streets_remaining,
+                self.actions_this_street + 1,
+            );
 
-            r.gen_subtree();
             return Some(r);
         } else {
             let amount_behind = match self.position {
@@ -938,17 +1220,18 @@ impl Node {
                         Position::BigBlind => Outcome::BBFolded,
                     };
 
-                    let mut r = Node::from(
+                    let r = Node::from(
                         self.chip_state,
                         self.position.next(),
                         NodeType::AheadNode,
                         true,
                         Some(outcome),
-                        self.sb_range,
-                        self.bb_range,
+                        *self.sb_range,
+                        *self.bb_range,
+                        self.streets_remaining,
+                        self.actions_this_street,
                     );
 
-                    r.gen_subtree();
                     return Some(r);
                 }
 
@@ -963,17 +1246,8 @@ impl Node {
                     let mut ns = self.chip_state;
                     ns.update_with(bet);
 
-                    let mut r = Node::from(
-                        ns,
-                        self.position.next(),
-                        NodeType::EvenNode,
-                        true,
-                        Some(Outcome::Showdown),
-                        self.sb_range,
-                        self.bb_range,
-                    );
+                    let r = self.call_successor(ns);
 
-                    r.gen_subtree();
                     return Some(r);
                 }
 
@@ -999,20 +1273,22 @@ impl Node {
                     let mut ns = self.chip_state;
                     ns.update_with(bet);
 
-                    let (terminal, outcome) =
-                        if amount <= amount_behind { (true, Some(Outcome::Showdown)) } else { (false, None) };
+                    let r = if amount <= amount_behind {
+                        self.call_successor(ns)
+                    } else {
+                        Node::from(
+                            ns,
+                            self.position.next(),
+                            NodeType::BehindNode,
+                            false,
+                            None,
+                            *self.sb_range,
+                            *self.bb_range,
+                            self.streets_remaining,
+                            self.actions_this_street + 1,
+                        )
+                    };
 
-                    let mut r = Node::from(
-                        ns,
-                        self.position.next(),
-                        NodeType::BehindNode,
-                        terminal,
-                        outcome,
-                        self.sb_range,
-                        self.bb_range,
-                    );
-
-                    r.gen_subtree();
                     return Some(r);
                 }
                 3 => {
@@ -1026,20 +1302,22 @@ impl Node {
                     let mut ns = self.chip_state;
                     ns.update_with(bet);
 
-                    let (terminal, outcome) =
-                        if amount <= amount_behind { (true, Some(Outcome::Showdown)) } else { (false, None) };
+                    let r = if amount <= amount_behind {
+                        self.call_successor(ns)
+                    } else {
+                        Node::from(
+                            ns,
+                            self.position.next(),
+                            NodeType::BehindNode,
+                            false,
+                            None,
+                            *self.sb_range,
+                            *self.bb_range,
+                            self.streets_remaining,
+                            self.actions_this_street + 1,
+                        )
+                    };
 
-                    let mut r = Node::from(
-                        ns,
-                        self.position.next(),
-                        NodeType::BehindNode,
-                        terminal,
-                        outcome,
-                        self.sb_range,
-                        self.bb_range,
-                    );
-
-                    r.gen_subtree();
                     return Some(r);
                 }
 
@@ -1055,27 +1333,45 @@ impl Node {
 
         match self.node_type {
             NodeType::BehindNode => {
-                let children =
+                let mut children: [Box<Node>; 4] =
                     (0..4).map(|i| Box::new(self.successor(i).unwrap())).collect::<Vec<_>>().try_into().unwrap();
 
+                let legal = Self::distinct_actions(&children);
+
+                for i in 0..4 {
+                    if legal[i] {
+                        children[i].gen_subtree();
+                    }
+                }
+
                 let mut actions = BehindActions::BLANK;
-                actions.legal = Self::distinct_actions(&children);
+                actions.legal = legal;
                 actions.probs = softmax(&actions.total_ev, &actions.legal);
                 actions.children = Some(children);
 
                 self.actions = Some(Actions::Behind(actions));
             }
+
             NodeType::EvenNode => {
-                let children =
+                let mut children: [Box<Node>; 5] =
                     (0..5).map(|i| Box::new(self.successor(i).unwrap())).collect::<Vec<_>>().try_into().unwrap();
 
+                let legal = Self::distinct_actions(&children);
+
+                for i in 0..5 {
+                    if legal[i] {
+                        children[i].gen_subtree();
+                    }
+                }
+
                 let mut actions = EvenActions::BLANK;
-                actions.legal = Self::distinct_actions(&children);
+                actions.legal = legal;
                 actions.probs = softmax(&actions.total_ev, &actions.legal);
                 actions.children = Some(children);
 
                 self.actions = Some(Actions::Even(actions));
             }
+
             _ => unreachable!(),
         }
     }

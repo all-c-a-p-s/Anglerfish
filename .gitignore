@@ -1,1 +1,16 @@
-/target
+/target/
+
+/Anglerfish
+/Anglerfish.exe
+
+.DS_Store
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+profile.json
+perf.data
+perf.data.old
+samply-recording.json

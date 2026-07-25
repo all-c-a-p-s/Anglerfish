@@ -1,4 +1,5 @@
 pub mod game;
+pub mod hash;
 pub mod rng;
 pub mod search;
 
@@ -39,7 +40,7 @@ fn main() {
 
     let root = game_state.do_runouts();
 
-    println!("{:?}", start.elapsed());
+    println!("INFO analysis took: {:?}", start.elapsed());
 
     match root.actions.as_ref().unwrap() {
         Actions::Even(actions) => {

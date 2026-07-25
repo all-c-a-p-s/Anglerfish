@@ -88,8 +88,8 @@ impl<T> IndexMut<Rank> for [T; 13] {
 
 #[derive(PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Debug)]
 pub struct Card {
-    rank: Rank,
-    suit: Suit,
+    pub rank: Rank,
+    pub suit: Suit,
 }
 
 impl<T> Index<Card> for [T; 52] {

@@ -1,6 +1,6 @@
 use crate::game::{CARD_MASKS, CARDS, Card, CardSet, ChipState, GameState, Hand, Rank, Suit, cfor};
+use crate::hash::EquivalenceHash;
 use crate::rng::XorShiftU64;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -28,6 +28,10 @@ pub struct Range {
 pub struct ScoreCache {
     pub scores: [[Option<i32>; Card::NUM]; Card::NUM],
     sorted_hands: Vec<Hand>,
+
+    // For each card, the indices in sorted_hands of all 51 hands
+    // containing that card. These indices are naturally sorted.
+    hands_by_card: [Vec<usize>; Card::NUM],
 }
 
 struct CachedRunout {
@@ -36,10 +40,8 @@ struct CachedRunout {
 }
 
 impl ScoreCache {
-    pub const BLANK: Self = Self { scores: [[None; Card::NUM]; Card::NUM], sorted_hands: Vec::new() };
-
     pub fn from_board(board: CardSet) -> Self {
-        let mut cache = Self::BLANK;
+        let mut scores = [[None; Card::NUM]; Card::NUM];
         let mut sorted_hands = Vec::with_capacity(HAND_COUNT);
 
         for c1 in CARDS {
@@ -54,17 +56,23 @@ impl ScoreCache {
 
                 let score = cardset.score();
 
-                cache.scores[c1][c2] = Some(score);
-                cache.scores[c2][c1] = Some(score);
+                scores[c1][c2] = Some(score);
+                scores[c2][c1] = Some(score);
 
                 sorted_hands.push((c1, c2));
             }
         }
 
-        sorted_hands.sort_unstable_by_key(|&(c1, c2)| cache.scores[c1][c2].unwrap());
-        cache.sorted_hands = sorted_hands;
+        sorted_hands.sort_unstable_by_key(|&(c1, c2)| scores[c1][c2].unwrap());
 
-        cache
+        let mut hands_by_card: [Vec<usize>; Card::NUM] = std::array::from_fn(|_| Vec::with_capacity(Card::NUM - 1));
+
+        for (index, &(c1, c2)) in sorted_hands.iter().enumerate() {
+            hands_by_card[c1].push(index);
+            hands_by_card[c2].push(index);
+        }
+
+        Self { scores, sorted_hands, hands_by_card }
     }
 }
 
@@ -111,13 +119,41 @@ impl Range {
 
     fn equity_table(&self, cache: &ScoreCache) -> [[f64; Card::NUM]; Card::NUM] {
         let mut equities = [[0.0; Card::NUM]; Card::NUM];
-        let mut prefix = [0.0; HAND_COUNT + 1];
+
+        let mut pref = [0.0; HAND_COUNT + 1];
 
         for (i, &(c1, c2)) in cache.sorted_hands.iter().enumerate() {
-            prefix[i + 1] = prefix[i] + self.probs[c1][c2];
+            pref[i + 1] = pref[i] + self.probs[c1][c2];
         }
 
-        let total_probability = prefix[HAND_COUNT];
+        let total_p = pref[HAND_COUNT];
+
+        let blocker_pref: [Vec<f64>; Card::NUM] = std::array::from_fn(|card_index| {
+            let indices = &cache.hands_by_card[card_index];
+
+            let mut pref = Vec::with_capacity(indices.len() + 1);
+
+            pref.push(0.0);
+
+            let mut total = 0.0;
+
+            for &hand_index in indices {
+                let (c1, c2) = cache.sorted_hands[hand_index];
+
+                total += self.probs[c1][c2];
+                pref.push(total);
+            }
+
+            pref
+        });
+
+        let blocked_before = |card: Card, boundary: usize| -> f64 {
+            let indices = &cache.hands_by_card[card];
+
+            let count = indices.partition_point(|&index| index < boundary);
+
+            blocker_pref[card][count]
+        };
 
         for our_c1 in CARDS {
             for our_c2 in CARDS {
@@ -127,45 +163,25 @@ impl Range {
 
                 let our_score = cache.scores[our_c1][our_c2].unwrap();
 
-                let first_equal =
+                let first_eq =
                     cache.sorted_hands.partition_point(|&(c1, c2)| cache.scores[c1][c2].unwrap() < our_score);
-
-                let first_greater =
+                let first_gr =
                     cache.sorted_hands.partition_point(|&(c1, c2)| cache.scores[c1][c2].unwrap() <= our_score);
 
-                let mut win_probability = prefix[first_equal];
-                let mut tie_probability = prefix[first_greater] - prefix[first_equal];
-                let mut valid_probability = total_probability;
+                let self_p = self.probs[our_c1][our_c2];
 
-                let mut remove_blocked = |c1: Card, c2: Card| {
-                    let probability = if c1 > c2 { self.probs[c1][c2] } else { self.probs[c2][c1] };
+                let blocked_total = blocked_before(our_c1, HAND_COUNT) + blocked_before(our_c2, HAND_COUNT) - self_p;
 
-                    if probability == 0.0 {
-                        return;
-                    }
+                let blocked_win = blocked_before(our_c1, first_eq) + blocked_before(our_c2, first_eq);
+                let blocked_win_or_tie = blocked_before(our_c1, first_gr) + blocked_before(our_c2, first_gr) - self_p;
+                let blocked_tie = blocked_win_or_tie - blocked_win;
 
-                    valid_probability -= probability;
+                let valid_p = total_p - blocked_total;
 
-                    match cache.scores[c1][c2].unwrap().cmp(&our_score) {
-                        Ordering::Less => win_probability -= probability,
-                        Ordering::Equal => tie_probability -= probability,
-                        Ordering::Greater => {}
-                    }
-                };
+                let win_p = pref[first_eq] - blocked_win;
+                let tie_p = (pref[first_gr] - pref[first_eq]) - blocked_tie;
 
-                for c in CARDS {
-                    if c != our_c1 {
-                        remove_blocked(our_c1, c);
-                    }
-                }
-
-                for c in CARDS {
-                    if c != our_c1 && c != our_c2 {
-                        remove_blocked(our_c2, c);
-                    }
-                }
-
-                let equity = (win_probability + 0.5 * tie_probability) / valid_probability;
+                let equity = (win_p + 0.5 * tie_p) / valid_p;
 
                 equities[our_c1][our_c2] = equity;
                 equities[our_c2][our_c1] = equity;
@@ -309,8 +325,8 @@ fn softmax<const N: usize, const RANGE_CALC: bool>(values: &[f64; N], legal: &[b
         }
     }
 
-    for probability in &mut probs {
-        *probability /= total;
+    for p in &mut probs {
+        *p /= total;
     }
 
     probs
@@ -382,15 +398,17 @@ impl HandPolicyState {
 
 const RANGE_UPDATE_DEPTH: usize = 2;
 
-const NUM_PLAYOUTS: usize = 256;
+const NUM_PLAYOUTS: usize = 1024;
 const HAND_COUNT: usize = Card::NUM * (Card::NUM - 1) / 2;
 const HAND_BATCH_SIZE: usize = HAND_COUNT;
 const NUM_RANGE_PASSES: usize = 4;
 
+const SHOW_DIAGNOSTICS: bool = false;
+
 fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_runouts: usize) {
     const NUM_SHOWN: usize = 10;
 
-    let uniform_probability = 1.0 / HAND_COUNT as f64;
+    let uniform_p = 1.0 / HAND_COUNT as f64;
 
     let aa = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::Ace, Suit::Hearts));
     let aks = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Spades));
@@ -403,9 +421,9 @@ fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_ru
     let interesting_hands =
         [("AA", aa), ("AKs", aks), ("AKo", ako), ("TT", tt), ("22", dd), ("72o", sdo), ("T9s", t9s)];
 
-    let mut combinations = Vec::new();
+    let mut combos = Vec::new();
     let mut entropy = 0.0;
-    let mut total_probability = 0.0;
+    let mut total_p = 0.0;
     let mut nonzero = 0usize;
 
     for c1 in CARDS {
@@ -414,28 +432,28 @@ fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_ru
                 continue;
             }
 
-            let probability = range.probs[c1][c2];
+            let p = range.probs[c1][c2];
 
-            if probability > 0.0 {
+            if p > 0.0 {
                 nonzero += 1;
-                total_probability += probability;
-                entropy -= probability * probability.ln();
+                total_p += p;
+                entropy -= p * p.ln();
 
-                combinations.push(((c1, c2), probability));
+                combos.push(((c1, c2), p));
             }
         }
     }
 
-    combinations.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    combos.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-    let mass_in_top = |n: usize| -> f64 { combinations.iter().take(n).map(|(_, probability)| probability).sum() };
+    let mass_in_top = |n: usize| -> f64 { combos.iter().take(n).map(|(_, p)| p).sum() };
 
     let equity_vs_random = state.range_equity_vs_random(*range, equity_runouts);
 
     println!("\n========== {name} ==========");
-    println!("Total probability:       {total_probability:.10}");
-    println!("Nonzero combinations:    {nonzero}");
-    println!("Effective combinations:  {:.2}", entropy.exp());
+    println!("Total p:       {total_p:.10}");
+    println!("Nonzero combos:    {nonzero}");
+    println!("Effective combos:  {:.2}", entropy.exp());
     println!("Equity vs random hand:    {:.2}%", 100.0 * equity_vs_random,);
     println!("Top 10 mass:              {:.2}%", 100.0 * mass_in_top(10),);
     println!("Top 50 mass:              {:.2}%", 100.0 * mass_in_top(50),);
@@ -446,35 +464,21 @@ fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_ru
     for &(label, hand) in &interesting_hands {
         let (c1, c2) = if hand.0 > hand.1 { (hand.0, hand.1) } else { (hand.1, hand.0) };
 
-        let probability = range.probs[c1][c2];
+        let p = range.probs[c1][c2];
 
-        println!("{label:>4}: {probability:.10} ({:>6.3}x uniform)", probability / uniform_probability,);
+        println!("{label:>4}: {p:.10} ({:>6.3}x uniform)", p / uniform_p,);
     }
 
     println!("\nMost common hands:");
 
-    for (rank, &((c1, c2), probability)) in combinations.iter().take(NUM_SHOWN).enumerate() {
-        println!(
-            "{:>2}. {:?} {:?}: {:.10} ({:.3}x uniform)",
-            rank + 1,
-            c1,
-            c2,
-            probability,
-            probability / uniform_probability,
-        );
+    for (rank, &((c1, c2), p)) in combos.iter().take(NUM_SHOWN).enumerate() {
+        println!("{:>2}. {:?} {:?}: {:.10} ({:.3}x uniform)", rank + 1, c1, c2, p, p / uniform_p,);
     }
 
     println!("\nLeast common nonzero hands:");
 
-    for (rank, &((c1, c2), probability)) in combinations.iter().rev().take(NUM_SHOWN).enumerate() {
-        println!(
-            "{:>2}. {:?} {:?}: {:.10} ({:.3}x uniform)",
-            rank + 1,
-            c1,
-            c2,
-            probability,
-            probability / uniform_probability,
-        );
+    for (rank, &((c1, c2), p)) in combos.iter().rev().take(NUM_SHOWN).enumerate() {
+        println!("{:>2}. {:?} {:?}: {:.10} ({:.3}x uniform)", rank + 1, c1, c2, p, p / uniform_p,);
     }
 }
 
@@ -550,7 +554,9 @@ impl GameState {
 
             println!("INFO completed range pass {}/{}", pass_idx + 1, NUM_RANGE_PASSES,);
 
-            root.inspect_jam_ranges_after_pass(self, pass_idx + 1);
+            if SHOW_DIAGNOSTICS {
+                root.inspect_jam_ranges_after_pass(self, pass_idx + 1);
+            }
         }
 
         for _ in 0..NUM_PLAYOUTS {
@@ -585,7 +591,11 @@ impl GameState {
         let mut public_state = *self;
         public_state.remove_hero_hand();
 
-        let mut hands = Vec::new();
+        // Each class contains:
+        // - one rep hand to solve
+        // - all exact hands which will receive that policy
+        let mut class_indices = EquivalenceHash::<usize>::new();
+        let mut classes: Vec<(Hand, Vec<Hand>)> = Vec::new();
 
         for c1 in CARDS {
             for c2 in CARDS {
@@ -597,16 +607,36 @@ impl GameState {
                     continue;
                 }
 
-                hands.push((c1, c2));
+                let hand = (c1, c2);
+
+                if let Some(class_idx) = class_indices.lookup_hand(&self.board, hand).copied() {
+                    classes[class_idx].1.push(hand);
+                } else {
+                    let class_idx = classes.len();
+
+                    class_indices.insert_hand(&self.board, hand, class_idx);
+
+                    classes.push((hand, vec![hand]));
+                }
             }
         }
 
-        for batch in hands.chunks(HAND_BATCH_SIZE) {
-            let mut states = batch.iter().copied().map(|hand| (hand, HandPolicyState::default())).collect::<Vec<_>>();
+        println!(
+            "INFO reduced {} hands to {} equivalence classes",
+            classes.iter().map(|(_, members)| members.len()).sum::<usize>(),
+            classes.len(),
+        );
+
+        for batch in classes.chunks(HAND_BATCH_SIZE) {
+            let mut states = batch.iter().map(|(rep, _)| (*rep, HandPolicyState::default())).collect::<Vec<_>>();
 
             for runout in cached_runouts {
                 let public_seen = runout.public_seen;
-                let mut terminal_equities = Vec::new();
+
+                let mut terminal_equities: HashMap<
+                    (*const Range, *const Range),
+                    (Box<[[f64; Card::NUM]; Card::NUM]>, f64),
+                > = HashMap::new();
 
                 for (hand, state) in &mut states {
                     let hand_mask = CARD_MASKS[hand.0] | CARD_MASKS[hand.1];
@@ -618,21 +648,19 @@ impl GameState {
                     let (choices, result, outcome) = base_root.playout_with_hand_state(&mut rng, state);
 
                     let (hero_equity, range_equity) = if matches!(outcome, Outcome::Showdown) {
-                        let cache_idx = terminal_equities.iter().position(|(path, _, _)| path == &choices);
+                        let terminal = base_root.node_at_path(&choices);
 
-                        let cache_idx = match cache_idx {
-                            Some(i) => i,
-                            None => {
-                                let terminal = base_root.node_at_path(&choices);
-                                let (equities, range_equity) =
-                                    terminal.equity_table_for_runout(self.turn, public_seen, &runout.cache);
+                        let key = (Rc::as_ptr(&terminal.sb_range), Rc::as_ptr(&terminal.bb_range));
 
-                                terminal_equities.push((choices.clone(), equities, range_equity));
-                                terminal_equities.len() - 1
-                            }
-                        };
+                        if !terminal_equities.contains_key(&key) {
+                            let (equities, range_equity) =
+                                terminal.equity_table_for_runout(self.turn, public_seen, &runout.cache);
 
-                        let (_, equities, range_equity) = &terminal_equities[cache_idx];
+                            terminal_equities.insert(key, (Box::new(equities), range_equity));
+                        }
+
+                        let (equities, range_equity) = terminal_equities.get(&key).unwrap();
+
                         (equities[hand.0][hand.1], *range_equity)
                     } else {
                         (0.0, 0.0)
@@ -649,8 +677,15 @@ impl GameState {
                 }
             }
 
-            for (hand, state) in states {
-                policies[hand.0][hand.1] = get_probs(base_root, &state);
+            for ((_, members), (rep, state)) in batch.iter().zip(states) {
+                let probs = get_probs(base_root, &state);
+
+                debug_assert_eq!(rep, members[0]);
+
+                for &hand in members {
+                    policies[hand.0][hand.1] = probs;
+                    policies[hand.1][hand.0] = probs;
+                }
             }
         }
 

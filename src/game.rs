@@ -171,6 +171,67 @@ pub const CARDS: [Card; Card::NUM] = [
     Card::new(Rank::Ace, Suit::Clubs),
 ];
 
+use std::fmt;
+
+impl fmt::Display for Card {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rank = match self.rank {
+            Rank::Two => '2',
+            Rank::Three => '3',
+            Rank::Four => '4',
+            Rank::Five => '5',
+            Rank::Six => '6',
+            Rank::Seven => '7',
+            Rank::Eight => '8',
+            Rank::Nine => '9',
+            Rank::Ten => 'T',
+            Rank::Jack => 'J',
+            Rank::Queen => 'Q',
+            Rank::King => 'K',
+            Rank::Ace => 'A',
+        };
+
+        let suit = match self.suit {
+            Suit::Hearts => 'h',
+            Suit::Diamonds => 'd',
+            Suit::Spades => 's',
+            Suit::Clubs => 'c',
+        };
+
+        write!(f, "{rank}{suit}")
+    }
+}
+
+impl fmt::Display for CardSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cards = self.get_cards();
+
+        let s = cards.iter().fold("".to_string(), |acc, x| acc + format!("{x}").as_str());
+
+        write!(f, "{s}")
+    }
+}
+
+impl fmt::Display for ChipState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "pot: {}\n", self.pot)?;
+        write!(f, "bb stack: {}\n", self.bb_stack)?;
+        write!(f, "sb stack: {}", self.sb_stack)?;
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for GameState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GAMESTATE BOARD:\n{}\n\n", self.board)?;
+        write!(f, "CHIPSTATE:\n{}\n\n", self.chip_state)?;
+        write!(f, "HERO HAND: {}{}\n", self.hero_hand.0, self.hero_hand.1)?;
+
+        Ok(())
+    }
+}
+
 /// Cardset != 5-card hand.
 /// This is just the union of our hole cards and whatever community cards there are.
 /// To assess the strength of the hand, we only need suit masks and rank counts.
@@ -238,6 +299,23 @@ impl CardSet {
         });
 
         None
+    }
+
+    pub fn get_cards(&self) -> Vec<Card> {
+        let m = (self.suit_masks[3] as u64) << 39
+            | (self.suit_masks[2] as u64) << 26
+            | (self.suit_masks[1] as u64) << 13
+            | self.suit_masks[0] as u64;
+
+        let mut res = vec![];
+
+        for c in CARDS {
+            if m & CARD_MASKS[c] > 0 {
+                res.push(c);
+            }
+        }
+
+        res
     }
 
     const MASKS_TOTAL: usize = 1 << 13; // 8192
@@ -365,7 +443,7 @@ impl CardSet {
         0b_0000_0010_0000_0000,
         0b_0000_0100_0000_0000,
         0b_0000_1000_0000_0000,
-        0b_0001_1000_0000_0000,
+        0b_0001_0000_0000_0000,
     ];
 
     pub fn update_with(&mut self, c: Card) {

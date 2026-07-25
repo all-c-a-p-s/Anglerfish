@@ -96,7 +96,7 @@ impl XorShiftU64 {
         lo - 1
     }
 
-    pub fn choose_action(&mut self, ps: &[f64]) -> usize {
+    pub fn choose_action(&mut self, ps: &[f64]) -> (usize, f64) {
         let n = ps.len();
         let mut pref = vec![0.0; n + 1];
 
@@ -118,6 +118,6 @@ impl XorShiftU64 {
             }
         }
 
-        lo - 1
+        (lo - 1, ps[lo - 1])
     }
 }

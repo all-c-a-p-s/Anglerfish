@@ -1,27 +1,31 @@
 pub mod game;
 pub mod hash;
+pub mod play;
 pub mod rng;
 pub mod search;
 
-use std::time::Instant;
-
 use crate::game::*;
+use crate::play::*;
 use crate::search::*;
 
 #[allow(unused)]
+mod hands {
+    use super::*;
+
+    pub const AA: Hand = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::Ace, Suit::Hearts));
+    pub const AKS: Hand = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Spades));
+    pub const AKO: Hand = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Hearts));
+    pub const DD: Hand = (Card::new(Rank::Two, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
+    pub const TT: Hand = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Ten, Suit::Hearts));
+    pub const SDO: Hand = (Card::new(Rank::Seven, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
+    pub const T9S: Hand = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Nine, Suit::Spades));
+}
+
 fn main() {
-    let chip_state = ChipState { pot: 3, sb_stack: 99, bb_stack: 98, sb_this_street: 1, bb_this_street: 2, max_bet: 2 };
+    let chip_state =
+        ChipState { pot: 10, sb_stack: 95, bb_stack: 95, sb_this_street: 0, bb_this_street: 0, max_bet: 5 };
 
-    let aa = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::Ace, Suit::Hearts));
-    let aks = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Spades));
-    let ako = (Card::new(Rank::Ace, Suit::Spades), Card::new(Rank::King, Suit::Hearts));
-    let tt = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Ten, Suit::Hearts));
-    let dd = (Card::new(Rank::Two, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
-    let sdo = (Card::new(Rank::Seven, Suit::Spades), Card::new(Rank::Two, Suit::Hearts));
-    let t9s = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Nine, Suit::Spades));
-
-    let hand = dd;
-    dbg!(hand.0, hand.1);
+    let hand = hands::DD;
 
     let mut game_state = GameState {
         chip_state,
@@ -36,27 +40,14 @@ fn main() {
 
     game_state.set_hero_hand(hand);
 
-    let start = Instant::now();
+    let flop =
+        [Card::new(Rank::Two, Suit::Clubs), Card::new(Rank::Ace, Suit::Clubs), Card::new(Rank::Five, Suit::Hearts)];
 
-    let root = game_state.do_runouts();
-
-    println!("INFO analysis took: {:?}", start.elapsed());
-
-    match root.actions.as_ref().unwrap() {
-        Actions::Even(actions) => {
-            println!("\nROOT ACTIONS:");
-            dbg!(actions.probs);
-            dbg!(actions.visits);
-            dbg!(actions.total_ev);
-            dbg!(actions.legal);
-        }
-
-        Actions::Behind(actions) => {
-            println!("\nROOT ACTIONS:");
-            dbg!(actions.probs);
-            dbg!(actions.visits);
-            dbg!(actions.total_ev);
-            dbg!(actions.legal);
-        }
+    for card in flop {
+        game_state.board.update_with(card);
+        game_state.seen |= CARD_MASKS[card];
+        game_state.board_len += 1;
     }
+
+    play_from(&mut game_state);
 }

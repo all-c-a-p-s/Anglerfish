@@ -3,6 +3,7 @@ use crate::hash::EquivalenceHash;
 use crate::rng::XorShiftU64;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// Big search file!!!
 /// Generally, there are two parts:
@@ -418,10 +419,20 @@ impl ChipState {
 }
 
 const POLICY_TEMPERATURE: f64 = 5.0;
-const RANGE_TEMPERATURE: f64 = 1.0;
+const RANGE_TEMP_SCALE: f64 = 1_000.0;
+
+static RANGE_TEMPERATURE: AtomicU64 = AtomicU64::new(1_000); // 1.000
+
+pub fn set_range_temp(value: f64) {
+    RANGE_TEMPERATURE.store((value * RANGE_TEMP_SCALE).round() as u64, Relaxed);
+}
+
+fn range_temp() -> f64 {
+    RANGE_TEMPERATURE.load(Relaxed) as f64 / RANGE_TEMP_SCALE
+}
 
 fn softmax<const N: usize, const RANGE_CALC: bool>(values: &[f64; N], legal: &[bool; N]) -> [f64; N] {
-    let temperature = if RANGE_CALC { RANGE_TEMPERATURE } else { POLICY_TEMPERATURE };
+    let temperature = if RANGE_CALC { range_temp() } else { POLICY_TEMPERATURE };
 
     let max_value = (0..N).filter(|&i| legal[i]).map(|i| values[i]).fold(f64::NEG_INFINITY, f64::max);
 

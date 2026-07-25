@@ -1,6 +1,6 @@
 use crate::game::{CARD_MASKS, Card, CardSet, ChipState, GameState, Hand, Rank, Suit};
 use crate::rng::XorShiftU64;
-use crate::search::{Actions, Node, Outcome, Position, Range, inspect_range_summary};
+use crate::search::{Actions, Node, Outcome, Position, Range, inspect_range_summary, set_range_temp};
 
 use std::io;
 use std::time::Instant;
@@ -101,17 +101,29 @@ fn apply_action(gs: &mut GameState, root: &Node, choice: usize) -> AppliedAction
 }
 
 pub fn play_from(gs: &mut GameState) -> AppliedAction {
-    let root = solve(gs);
+    set_range_temp(1.0);
+    let policy_root = solve(gs);
+
     let mut rng = XorShiftU64::new();
 
-    let (choice, probability) = match root.actions.as_ref().expect("root should not be terminal") {
+    let (choice, probability) = match policy_root.actions.as_ref().expect("root should not be terminal") {
         Actions::Even(actions) => rng.choose_action(&actions.probs),
         Actions::Behind(actions) => rng.choose_action(&actions.probs),
     };
 
-    println!("DECISION chose action {} with probability {:.2}%", action_name(&root, choice), 100.0 * probability,);
+    println!(
+        "DECISION chose action {} with probability {:.2}%",
+        action_name(&policy_root, choice),
+        100.0 * probability,
+    );
 
-    apply_action(gs, &root, choice)
+    // Since our opponent probably plays differently to us, we increase the temperature when
+    // considering their range/their perception of our range.
+    set_range_temp(10.0);
+    let range_root = gs.build_ranged_tree();
+    set_range_temp(1.0);
+
+    apply_action(gs, &range_root, choice)
 }
 
 fn receive_action(root: &Node) -> usize {
@@ -166,7 +178,10 @@ fn receive_opponent_action(gs: &mut GameState) -> AppliedAction {
 
     println!("{gs}");
 
+    // As above.
+    set_range_temp(10.0);
     let root = gs.build_ranged_tree();
+    set_range_temp(1.0);
 
     println!("INFO range analysis took: {:?}", start.elapsed(),);
     println!("INFO waiting to receive opponent action");
@@ -301,7 +316,7 @@ impl Parseable for ChipState {
     }
 }
 
-const INSPECT_RANGES: bool = true;
+const INSPECT_RANGES: bool = false;
 
 pub fn hand_loop() {
     println!("INFO waiting to receive chip state after blinds (sb [stack] [bet] bb [stack] [bet])");

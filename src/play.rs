@@ -101,7 +101,6 @@ fn apply_action(gs: &mut GameState, root: &Node, choice: usize) -> AppliedAction
 }
 
 pub fn play_from(gs: &mut GameState) -> AppliedAction {
-    set_range_temp(1.0);
     let policy_root = solve(gs);
 
     let mut rng = XorShiftU64::new();
@@ -120,7 +119,9 @@ pub fn play_from(gs: &mut GameState) -> AppliedAction {
     // Since our opponent probably plays differently to us, we increase the temperature when
     // considering their range/their perception of our range.
     set_range_temp(10.0);
+    let start = Instant::now();
     let range_root = gs.build_ranged_tree();
+    println!("INFO range analysis took: {:?}", start.elapsed(),);
     set_range_temp(1.0);
 
     apply_action(gs, &range_root, choice)
@@ -151,7 +152,7 @@ fn receive_action(root: &Node) -> usize {
             "fold" => 0,
             "call" => 1,
             "2.5x" => 2,
-            "allin" => 3,
+            "all-in" => 3,
 
             _ => panic!(
                 "invalid action; expected \

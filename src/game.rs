@@ -224,9 +224,11 @@ impl fmt::Display for ChipState {
 
 impl fmt::Display for GameState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "GAMESTATE BOARD:\n{}\n\n", self.board)?;
+        write!(f, "{}", "=".repeat(20))?;
+        write!(f, "\nBOARD:\n{}\n\n", self.board)?;
         write!(f, "CHIPSTATE:\n{}\n\n", self.chip_state)?;
         write!(f, "HERO HAND: {}{}\n", self.hero_hand.0, self.hero_hand.1)?;
+        write!(f, "{}", "=".repeat(20))?;
 
         Ok(())
     }

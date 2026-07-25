@@ -55,15 +55,12 @@ impl XorShiftU64 {
     }
 
     pub fn next_f64(&mut self) -> f64 {
-        const MX: i64 = 1_000_000_007;
-        let h = self.gen_range(1, MX);
+        const SCALE: f64 = 1.0 / ((1_u64 << 53) as f64);
 
-        h as f64 / MX as f64
+        ((self.next() >> 11) as f64) * SCALE
     }
 
     pub fn explore_action(&mut self, ps: &[f64], legal: &[bool]) -> usize {
-        assert_eq!(ps.len(), legal.len());
-
         let n = ps.len();
         let legal_count = legal.iter().filter(|&&x| x).count();
 

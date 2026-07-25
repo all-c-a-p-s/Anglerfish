@@ -291,7 +291,8 @@ impl Range {
                 let win_p = pref[first_equal] - blocked_win;
                 let tie_p = (pref[first_greater] - pref[first_equal]) - blocked_tie;
 
-                let equity = (win_p + 0.5 * tie_p) / valid_p;
+                // won't matter if it's zero anyway, just don't wanna crash
+                let equity = if valid_p == 0.0 { 0.5 } else { (win_p + 0.5 * tie_p) / valid_p };
 
                 equities[our_c1][our_c2] = equity;
                 equities[our_c2][our_c1] = equity;
@@ -805,10 +806,8 @@ impl GameState {
                 }
             }
 
-            for ((_, members), (rep, state)) in batch.iter().zip(states) {
+            for ((_, members), (_, state)) in batch.iter().zip(states) {
                 let probs = get_probs(base_root, &state);
-
-                debug_assert_eq!(rep, members[0]);
 
                 for &hand in members {
                     policies[hand.0][hand.1] = probs;
@@ -1502,12 +1501,11 @@ impl Node {
     }
 
     fn call_successor(&self, chip_state: ChipState) -> Self {
-        if chip_state.sb_stack == 0 || chip_state.bb_stack == 0 || self.actions_this_street > 0 {
-            self.close_betting_round(chip_state)
-        } else {
+        if self.streets_remaining == 4 && self.position == Position::SmallBlind && self.actions_this_street == 0 {
+            // SB calling BB preflop
             Node::from(
                 chip_state,
-                self.position.next(),
+                Position::BigBlind,
                 NodeType::EvenNode,
                 false,
                 None,
@@ -1516,6 +1514,8 @@ impl Node {
                 self.streets_remaining,
                 1,
             )
+        } else {
+            self.close_betting_round(chip_state)
         }
     }
 

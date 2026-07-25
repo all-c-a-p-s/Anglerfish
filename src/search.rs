@@ -4,6 +4,41 @@ use crate::rng::XorShiftU64;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Big search file!!!
+/// Generally, there are two parts:
+///
+/// (1) MCTS-ish search of game tree:
+/// There are several Monte-Carlo playouts. In each one:
+/// - each side chooses a random set of actions through the game tree before seeing any of the
+///   future cards.
+/// - we generate a runout of cards, and use ranges (see below) to adjudicate showdown
+/// - we update action probabilities based on the outcome
+/// The idea is that over several playouts, the actions probabilities will approach the optimal
+/// probabilities over the average runout.
+///
+/// This essentially gives us a function mapping a hand/board situation to a probability
+/// distribution of actions (call this F). Specifically
+///
+/// F: (hand, board, ranges) -> distribution
+///
+/// (2) Ranging:
+/// But how can we actually estimate which hands our opponent is likely to have in a given showdown
+/// situation, given the actions they performed. Bayes theorem to the rescue!
+///
+/// H_i := have hand i, A := these actions
+/// P(H_i | A) = P(H_i n A) / P(A)
+///
+/// Note that we can get P(A | H_i) from F, P(H_i) is the prior probability of having this hand
+/// do P(A) = SUM over all H_j[ P(A | H_j) * P(H_j) ]
+/// P(H_i n A) = P(A | H_i) * P(H_i)
+///
+/// so we can now update the probability of a player holding a hand based on their actions.
+///
+/// Since these ranges actually depend on each other (e.g. if your opponents range to call your bet
+/// is strong, your betting range needs to be strong/polar as well), we run several ranging passes.
+/// Each pass runs F on the range estimates from the previous pass.
+
+/// One node in the future game tree
 #[derive(Debug, Clone)]
 pub struct Node {
     pub terminal: bool,
@@ -18,22 +53,36 @@ pub struct Node {
     pub actions_this_street: u8,
 }
 
+/// Similar to the concept of a "range" that humans use when playing poker.
+/// We assign a probability to each hand a player might hold.
 #[derive(Debug, Clone, Copy)]
 pub struct Range {
     pub probs: [[f64; Card::NUM]; Card::NUM],
-    pub equity_against_with_hand: f64,
-    pub equity_against_with_range: f64,
 }
 
+/// Cache storing all showdown information used for constructing equity table.
 pub struct ScoreCache {
     pub scores: [[Option<i32>; Card::NUM]; Card::NUM],
     sorted_hands: Vec<Hand>,
 
-    // For each card, the indices in sorted_hands of all 51 hands
-    // containing that card. These indices are naturally sorted.
+    /// For each card, sorted_hands indices of the 51 hands containing it.
     hands_by_card: [Vec<usize>; Card::NUM],
+
+    /// Map an exact hand to its index in sorted_hands.
+    sorted_index: [[u16; Card::NUM]; Card::NUM],
+
+    /// Score-group boundaries for each sorted hand.
+    first_equal: [u16; HAND_COUNT],
+    first_greater: [u16; HAND_COUNT],
+
+    /// For each card and hero-hand index:
+    /// how many hands containing that card occur before the boundary.
+    blocked_before_equal: [Vec<u8>; Card::NUM],
+    blocked_before_greater: [Vec<u8>; Card::NUM],
 }
 
+/// Single runout will be used for a whole batch of cards,
+/// so they can share ScoreCache.
 struct CachedRunout {
     public_seen: u64,
     cache: ScoreCache,
@@ -42,6 +91,7 @@ struct CachedRunout {
 impl ScoreCache {
     pub fn from_board(board: CardSet) -> Self {
         let mut scores = [[None; Card::NUM]; Card::NUM];
+
         let mut sorted_hands = Vec::with_capacity(HAND_COUNT);
 
         for c1 in CARDS {
@@ -65,14 +115,74 @@ impl ScoreCache {
 
         sorted_hands.sort_unstable_by_key(|&(c1, c2)| scores[c1][c2].unwrap());
 
-        let mut hands_by_card: [Vec<usize>; Card::NUM] = std::array::from_fn(|_| Vec::with_capacity(Card::NUM - 1));
+        let mut sorted_index = [[0; Card::NUM]; Card::NUM];
+
+        let mut hands_by_card = std::array::from_fn(|_| Vec::with_capacity(Card::NUM - 1));
 
         for (index, &(c1, c2)) in sorted_hands.iter().enumerate() {
+            sorted_index[c1][c2] = index as u16;
+            sorted_index[c2][c1] = index as u16;
+
             hands_by_card[c1].push(index);
             hands_by_card[c2].push(index);
         }
 
-        Self { scores, sorted_hands, hands_by_card }
+        let mut first_equal = [0; HAND_COUNT];
+        let mut first_greater = [0; HAND_COUNT];
+
+        let mut start = 0;
+
+        while start < HAND_COUNT {
+            let (c1, c2) = sorted_hands[start];
+            let score = scores[c1][c2].unwrap();
+
+            let mut end = start + 1;
+
+            while end < HAND_COUNT {
+                let (c1, c2) = sorted_hands[end];
+
+                if scores[c1][c2].unwrap() != score {
+                    break;
+                }
+
+                end += 1;
+            }
+
+            for index in start..end {
+                first_equal[index] = start as u16;
+                first_greater[index] = end as u16;
+            }
+
+            start = end;
+        }
+
+        let mut blocked_before_equal = std::array::from_fn(|_| vec![0; HAND_COUNT]);
+        let mut blocked_before_greater = std::array::from_fn(|_| vec![0; HAND_COUNT]);
+
+        for card in CARDS {
+            let blocked_indices = &hands_by_card[card];
+
+            for hand_index in 0..HAND_COUNT {
+                let equal_boundary = first_equal[hand_index] as usize;
+                let greater_boundary = first_greater[hand_index] as usize;
+
+                blocked_before_equal[card][hand_index] =
+                    blocked_indices.partition_point(|&index| index < equal_boundary) as u8;
+                blocked_before_greater[card][hand_index] =
+                    blocked_indices.partition_point(|&index| index < greater_boundary) as u8;
+            }
+        }
+
+        Self {
+            scores,
+            sorted_hands,
+            hands_by_card,
+            sorted_index,
+            first_equal,
+            first_greater,
+            blocked_before_equal,
+            blocked_before_greater,
+        }
     }
 }
 
@@ -85,7 +195,7 @@ impl Range {
             probs[i][i] = 0.0;
         });
 
-        Self { probs, equity_against_with_hand: 0.0, equity_against_with_range: 0.0 }
+        Self { probs }
     }
 
     pub const BLANK: Self = Self::no_information();
@@ -117,6 +227,7 @@ impl Range {
         }
     }
 
+    /// Gets equity of each possible hero hand against this range.
     fn equity_table(&self, cache: &ScoreCache) -> [[f64; Card::NUM]; Card::NUM] {
         let mut equities = [[0.0; Card::NUM]; Card::NUM];
 
@@ -128,7 +239,7 @@ impl Range {
 
         let total_p = pref[HAND_COUNT];
 
-        let blocker_pref: [Vec<f64>; Card::NUM] = std::array::from_fn(|card_index| {
+        let blocker_pref = std::array::from_fn(|card_index| {
             let indices = &cache.hands_by_card[card_index];
 
             let mut pref = Vec::with_capacity(indices.len() + 1);
@@ -147,39 +258,37 @@ impl Range {
             pref
         });
 
-        let blocked_before = |card: Card, boundary: usize| -> f64 {
-            let indices = &cache.hands_by_card[card];
-
-            let count = indices.partition_point(|&index| index < boundary);
-
-            blocker_pref[card][count]
-        };
-
         for our_c1 in CARDS {
             for our_c2 in CARDS {
                 if our_c1 <= our_c2 {
                     continue;
                 }
 
-                let our_score = cache.scores[our_c1][our_c2].unwrap();
+                let hand_index = cache.sorted_index[our_c1][our_c2] as usize;
+                let first_equal = cache.first_equal[hand_index] as usize;
+                let first_greater = cache.first_greater[hand_index] as usize;
 
-                let first_eq =
-                    cache.sorted_hands.partition_point(|&(c1, c2)| cache.scores[c1][c2].unwrap() < our_score);
-                let first_gr =
-                    cache.sorted_hands.partition_point(|&(c1, c2)| cache.scores[c1][c2].unwrap() <= our_score);
+                let c1_before_equal = cache.blocked_before_equal[our_c1][hand_index] as usize;
+                let c2_before_equal = cache.blocked_before_equal[our_c2][hand_index] as usize;
+                let c1_before_greater = cache.blocked_before_greater[our_c1][hand_index] as usize;
+                let c2_before_greater = cache.blocked_before_greater[our_c2][hand_index] as usize;
 
                 let self_p = self.probs[our_c1][our_c2];
 
-                let blocked_total = blocked_before(our_c1, HAND_COUNT) + blocked_before(our_c2, HAND_COUNT) - self_p;
+                let blocked_total = blocker_pref[our_c1].last().copied().unwrap()
+                    + blocker_pref[our_c2].last().copied().unwrap()
+                    - self_p;
 
-                let blocked_win = blocked_before(our_c1, first_eq) + blocked_before(our_c2, first_eq);
-                let blocked_win_or_tie = blocked_before(our_c1, first_gr) + blocked_before(our_c2, first_gr) - self_p;
+                let blocked_win = blocker_pref[our_c1][c1_before_equal] + blocker_pref[our_c2][c2_before_equal];
+
+                let blocked_win_or_tie =
+                    blocker_pref[our_c1][c1_before_greater] + blocker_pref[our_c2][c2_before_greater] - self_p;
+
                 let blocked_tie = blocked_win_or_tie - blocked_win;
 
                 let valid_p = total_p - blocked_total;
-
-                let win_p = pref[first_eq] - blocked_win;
-                let tie_p = (pref[first_gr] - pref[first_eq]) - blocked_tie;
+                let win_p = pref[first_equal] - blocked_win;
+                let tie_p = (pref[first_greater] - pref[first_equal]) - blocked_tie;
 
                 let equity = (win_p + 0.5 * tie_p) / valid_p;
 
@@ -191,6 +300,7 @@ impl Range {
         equities
     }
 
+    /// Gets equity of another range against this one.
     fn equity_against_with_range(&self, range: Range, equities: &[[f64; Card::NUM]; Card::NUM]) -> f64 {
         let mut equity = 0.0;
 
@@ -361,12 +471,14 @@ pub enum HandPolicies {
     Behind([[[f64; 4]; Card::NUM]; Card::NUM]),
 }
 
+/// Stores action probabilities, which are calculated/updated using running average EV.
 #[derive(Clone, Copy)]
 enum NodePolicyStats {
     Even { probs: [f64; 5], total_ev: [f64; 5], visits: [u32; 5] },
     Behind { probs: [f64; 4], total_ev: [f64; 4], visits: [u32; 4] },
 }
 
+/// For any hand, caches NodePolicyState for each node in the game tree.
 #[derive(Default)]
 struct HandPolicyState {
     stats: HashMap<usize, NodePolicyStats>,
@@ -421,10 +533,10 @@ fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_ru
     let interesting_hands =
         [("AA", aa), ("AKs", aks), ("AKo", ako), ("TT", tt), ("22", dd), ("72o", sdo), ("T9s", t9s)];
 
-    let mut combos = Vec::new();
+    let mut combos = vec![];
     let mut entropy = 0.0;
     let mut total_p = 0.0;
-    let mut nonzero = 0usize;
+    let mut nonzero = 0;
 
     for c1 in CARDS {
         for c2 in CARDS {
@@ -502,6 +614,7 @@ impl GameState {
         }
     }
 
+    /// Pre-generates CachedRunouts to use for evaluating hands.
     fn cached_runouts(&self, count: usize) -> Vec<CachedRunout> {
         let mut public_state = *self;
         public_state.remove_hero_hand();
@@ -515,6 +628,8 @@ impl GameState {
             .collect()
     }
 
+    /// Does runouts with the actual hero hand, using all the ranging that has been done
+    /// previously.
     pub fn do_runouts(&self) -> Node {
         let nt = if self.chip_state.sb_this_street == self.chip_state.bb_this_street {
             NodeType::EvenNode
@@ -573,6 +688,7 @@ impl GameState {
         root
     }
 
+    /// Generates policy for each possible hand
     fn hand_policies_for<const N: usize>(
         &self,
         base_root: &Node,
@@ -595,7 +711,7 @@ impl GameState {
         // - one rep hand to solve
         // - all exact hands which will receive that policy
         let mut class_indices = EquivalenceHash::<usize>::new();
-        let mut classes: Vec<(Hand, Vec<Hand>)> = Vec::new();
+        let mut classes: Vec<(Hand, Vec<Hand>)> = vec![];
 
         for c1 in CARDS {
             for c2 in CARDS {
@@ -735,11 +851,13 @@ impl GameState {
         self.hand_policies_from_root(&root, &cached_runouts)
     }
 
+    /// Update ranges based on decision, when we don't have policies.
     pub fn update_ranges_with_decision(&mut self, decision_idx: usize) {
         let policies = self.hand_policies();
         self.update_ranges_with_policies(decision_idx, &policies);
     }
 
+    /// Update ranges based on decision, when we already have policies.
     pub fn update_ranges_with_policies(&mut self, decision_idx: usize, policies: &HandPolicies) {
         let range = match self.turn {
             Position::SmallBlind => &mut self.sb_range,
@@ -777,6 +895,8 @@ impl GameState {
         }
     }
 
+    /// Estimate equity of a hand vs any two cards (ATC).
+    /// Useful diagnostic to see how strong a range is.
     pub fn range_equity_vs_random(&self, range: Range, num_runouts: usize) -> f64 {
         let mut public_state = *self;
         public_state.remove_hero_hand();
@@ -807,6 +927,8 @@ impl GameState {
 }
 
 impl Node {
+    /// Check whether two actions lead to an idential outcome (e.g. calling all in or trying to
+    /// "raise" a bet that already puts you all in).
     fn same_successor(a: &Node, b: &Node) -> bool {
         a.terminal == b.terminal
             && a.outcome == b.outcome
@@ -851,10 +973,11 @@ impl Node {
         1 + children
     }
 
+    /// Useful for checking that ranging is working well - jamming ranges should typically be very
+    /// strong (or at least polar) and jam-calling range should be very strong.
     fn inspect_jam_ranges_after_pass(&self, state: &GameState, pass_number: usize) {
         let after_jam = match self.actions.as_ref().unwrap() {
             Actions::Even(actions) => actions.children.as_ref().unwrap()[4].as_ref(),
-
             Actions::Behind(actions) => actions.children.as_ref().unwrap()[3].as_ref(),
         };
 
@@ -886,6 +1009,8 @@ impl Node {
         legal
     }
 
+    /// Computes hero hand equity vs villain range, hero range (villain's perception or hero range)
+    /// equity vs villain range.
     fn equities_for_runout(
         &self,
         root_position: Position,
@@ -918,6 +1043,7 @@ impl Node {
         }
     }
 
+    /// Same as the above but computes for every possible hero hand.
     fn equity_table_for_runout(
         &self,
         root_position: Position,
@@ -947,6 +1073,7 @@ impl Node {
         }
     }
 
+    /// One playout, sampling from policy probabilities.
     fn playout_from_root_with_runout(
         &mut self,
         rng: &mut XorShiftU64,
@@ -969,6 +1096,7 @@ impl Node {
         self.apply_playout_result(choices, result, outcome, hero_equity, range_equity);
     }
 
+    /// Propagates result of playout to update probabilities.
     fn apply_playout_result(
         &mut self,
         choices: Vec<usize>,
@@ -1050,6 +1178,9 @@ impl Node {
         }
     }
 
+    /// Recursively updates ranges. Basically stuff like:
+    /// - if I jam now, what will they think my jamming range is?
+    /// - given that, what range will they call me with?
     fn update_subtree_ranges(
         &mut self,
         board: CardSet,
@@ -1117,6 +1248,7 @@ impl Node {
         }
     }
 
+    /// Finds node from sequence of choices in game tree.
     fn node_at_path(&self, choices: &[usize]) -> &Node {
         let mut node = self;
 
@@ -1134,12 +1266,13 @@ impl Node {
         node as *const Node as usize
     }
 
+    /// Playout with cached info about hand policy at various visited nodes.
     fn playout_with_hand_state(
         &self,
         rng: &mut XorShiftU64,
         state: &HandPolicyState,
     ) -> (Vec<usize>, ChipState, Outcome) {
-        let mut choices = Vec::new();
+        let mut choices = vec![];
         let mut node = self;
 
         loop {
@@ -1167,6 +1300,7 @@ impl Node {
         }
     }
 
+    /// Update HandPolicyState based on playout outcome.
     fn apply_playout_result_to_hand_state(
         &self,
         choices: &[usize],
@@ -1253,6 +1387,7 @@ impl Node {
         }
     }
 
+    /// Playout from node, sampling action probabilities.
     fn playout(&self, rng: &mut XorShiftU64) -> (Vec<usize>, ChipState, Outcome) {
         if self.terminal {
             return (vec![], self.chip_state, self.outcome.unwrap());

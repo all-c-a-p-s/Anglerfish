@@ -517,7 +517,7 @@ const NUM_RANGE_PASSES: usize = 4;
 
 const SHOW_DIAGNOSTICS: bool = false;
 
-fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_runouts: usize) {
+pub fn inspect_range_summary(name: &str, state: &GameState, range: &Range) {
     const NUM_SHOWN: usize = 10;
 
     let uniform_p = 1.0 / HAND_COUNT as f64;
@@ -560,7 +560,7 @@ fn inspect_range_summary(name: &str, state: &GameState, range: &Range, equity_ru
 
     let mass_in_top = |n: usize| -> f64 { combos.iter().take(n).map(|(_, p)| p).sum() };
 
-    let equity_vs_random = state.range_equity_vs_random(*range, equity_runouts);
+    let equity_vs_random = state.range_equity_vs_random(*range, 1024);
 
     println!("\n========== {name} ==========");
     println!("Total p:       {total_p:.10}");
@@ -628,21 +628,18 @@ impl GameState {
             .collect()
     }
 
-    /// Does runouts with the actual hero hand, using all the ranging that has been done
-    /// previously.
-    pub fn do_runouts(&self) -> Node {
-        let nt = if self.chip_state.sb_this_street == self.chip_state.bb_this_street {
+    /// Builds tree of ranges after various actions.
+    pub fn build_ranged_tree(&self) -> Node {
+        let node_type = if self.chip_state.sb_this_street == self.chip_state.bb_this_street {
             NodeType::EvenNode
         } else {
             NodeType::BehindNode
         };
 
-        let mut rng = XorShiftU64::new();
-
         let mut root = Node::from(
             self.chip_state,
             self.turn,
-            nt,
+            node_type,
             false,
             None,
             Rc::new(self.sb_range),
@@ -652,6 +649,7 @@ impl GameState {
         );
 
         root.gen_subtree();
+
         println!("INFO generated game tree");
         println!("INFO node count {}", root.node_count());
 
@@ -673,6 +671,15 @@ impl GameState {
                 root.inspect_jam_ranges_after_pass(self, pass_idx + 1);
             }
         }
+
+        root
+    }
+
+    /// Does runouts with the actual hero hand, using all the ranging that has been done
+    /// previously.
+    pub fn do_runouts(&self) -> Node {
+        let mut root = self.build_ranged_tree();
+        let mut rng = XorShiftU64::new();
 
         for _ in 0..NUM_PLAYOUTS {
             let runout = self.gen_runout();
@@ -736,12 +743,6 @@ impl GameState {
                 }
             }
         }
-
-        println!(
-            "INFO reduced {} hands to {} equivalence classes",
-            classes.iter().map(|(_, members)| members.len()).sum::<usize>(),
-            classes.len(),
-        );
 
         for batch in classes.chunks(HAND_BATCH_SIZE) {
             let mut states = batch.iter().map(|(rep, _)| (*rep, HandPolicyState::default())).collect::<Vec<_>>();
@@ -983,7 +984,7 @@ impl Node {
 
         println!("\n\n################ RANGE PASS {pass_number} ################");
 
-        inspect_range_summary("SB jamming range", state, after_jam.sb_range.as_ref(), 100);
+        inspect_range_summary("SB jamming range", state, after_jam.sb_range.as_ref());
 
         let Actions::Behind(response_actions) = after_jam.actions.as_ref().unwrap() else {
             unreachable!("Opponent should be facing the jam");
@@ -991,7 +992,7 @@ impl Node {
 
         let after_call = response_actions.children.as_ref().unwrap()[1].as_ref();
 
-        inspect_range_summary("BB call-after-jam range", state, after_call.bb_range.as_ref(), 100);
+        inspect_range_summary("BB call-after-jam range", state, after_call.bb_range.as_ref());
     }
 
     fn distinct_actions<const N: usize>(children: &[Box<Node>; N]) -> [bool; N] {

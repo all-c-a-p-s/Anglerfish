@@ -541,4 +541,10 @@ impl GameState {
             _ => unreachable!(),
         }
     }
+
+    pub fn add_card(&mut self, c: Card) {
+        self.board.update_with(c);
+        self.seen |= CARD_MASKS[c];
+        self.board_len += 1;
+    }
 }

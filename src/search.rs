@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 ///
 /// (2) Ranging:
 /// But how can we actually estimate which hands our opponent is likely to have in a given showdown
-/// situation, given the actions they performed. Bayes theorem to the rescue!
+/// situation, given the actions they performed? Bayes theorem to the rescue!
 ///
 /// H_i := have hand i, A := these actions
 /// P(H_i | A) = P(H_i n A) / P(A)

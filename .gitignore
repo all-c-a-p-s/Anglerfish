@@ -14,3 +14,7 @@ profile.json
 perf.data
 perf.data.old
 samply-recording.json
+
+*.hi
+*.o
+*.hie

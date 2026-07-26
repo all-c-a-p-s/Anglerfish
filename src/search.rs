@@ -1,4 +1,6 @@
-use crate::game::{CARD_MASKS, CARDS, Card, CardSet, ChipState, GameState, Hand, Rank, Suit, cfor};
+use crate::game::{
+    Bet, CARD_MASKS, CARDS, Card, CardSet, ChipState, GameState, Hand, Outcome, Position, Rank, Suit, cfor,
+};
 use crate::hash::EquivalenceHash;
 use crate::rng::XorShiftU64;
 use std::collections::HashMap;
@@ -370,53 +372,6 @@ pub enum NodeType {
 pub enum Actions {
     Even(EvenActions),
     Behind(BehindActions),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    Showdown, // goes to showdown -> resolve with equities
-    BBFolded, // BB folded -> SB gets all chips
-    SBFolded, // SB folded -> BB gets all chips
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Position {
-    SmallBlind,
-    BigBlind,
-}
-
-impl Position {
-    fn next(&self) -> Self {
-        match self {
-            Position::SmallBlind => Position::BigBlind,
-            Position::BigBlind => Position::SmallBlind,
-        }
-    }
-}
-
-pub enum Bet {
-    SBBet(i32),
-    BBBet(i32),
-}
-
-impl ChipState {
-    fn update_with(&mut self, bet: Bet) {
-        match bet {
-            Bet::SBBet(k) => {
-                self.sb_stack -= k;
-                self.sb_this_street += k;
-                self.pot += k;
-                self.max_bet = self.max_bet.max(self.sb_this_street);
-            }
-
-            Bet::BBBet(k) => {
-                self.bb_stack -= k;
-                self.bb_this_street += k;
-                self.pot += k;
-                self.max_bet = self.max_bet.max(self.bb_this_street);
-            }
-        }
-    }
 }
 
 const POLICY_TEMPERATURE: f64 = 5.0;

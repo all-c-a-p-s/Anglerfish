@@ -88,13 +88,15 @@ send engine message = do
   hPutStrLn (engineIn engine) message
   hFlush (engineIn engine)
 
-waitForDecision :: Engine -> IO Action
+waitForDecision :: Engine -> IO (Action, Maybe String)
 waitForDecision engine = do
   line <- hGetLine (engineOut engine)
 
   case words line of
+    "DECISION" : "chose" : "action" : action : "with" : "probability" : p : _ ->
+      pure ((parseAction action), Just p)
     "DECISION" : "chose" : "action" : action : _ ->
-      pure (parseAction action)
+      pure ((parseAction action), Nothing)
     _ ->
       waitForDecision engine
 
@@ -270,144 +272,150 @@ nextDecision ::
 nextDecision m isPreflop sbEngine bbEngine pos t
   | stackFor pos t == 0 =
       pure (refundUncalled t)
-  | otherwise = do
-      let player = engineFor sbEngine bbEngine pos
-          otherPos = opponent pos
-          otherEngine = engineFor sbEngine bbEngine otherPos
+  | otherwise =
+      do
+        let player = engineFor sbEngine bbEngine pos
+            otherPos = opponent pos
+            otherEngine = engineFor sbEngine bbEngine otherPos
 
-          notifyOther message =
-            when (stackFor otherPos t > 0) $
-              send otherEngine message
+            notifyOther message =
+              when (stackFor otherPos t > 0) $
+                send otherEngine message
 
-          continue u =
-            nextDecision
-              m
-              isPreflop
-              sbEngine
-              bbEngine
-              otherPos
-              u
+            continue u =
+              nextDecision
+                m
+                isPreflop
+                sbEngine
+                bbEngine
+                otherPos
+                u
 
-          bettingClosedByAllIn u =
-            stackFor otherPos t == 0
-              || ( stackFor pos u == 0
-                     && streetFor pos u
-                       <= streetFor otherPos u
-                 )
+            bettingClosedByAllIn u =
+              stackFor otherPos t == 0
+                || ( stackFor pos u == 0
+                       && streetFor pos u
+                         <= streetFor otherPos u
+                   )
 
-          settleOrContinue u =
-            if bettingClosedByAllIn u
+            settleOrContinue u =
+              if bettingClosedByAllIn u
+                then pure (refundUncalled u)
+                else continue u
+
+        (dec, p) <- waitForDecision player
+
+        when (not (legal t dec)) $
+          error ("illegal action: " ++ show dec)
+
+        let playerMove =
+              playerName m pos
+                ++ " ("
+                ++ show pos
+                ++ ") chooses "
+                ++ show dec
+                ++ case p of
+                  Just x -> " with probability " ++ x
+                  Nothing -> ""
+
+        putStrLn playerMove
+
+        case dec of
+          Fold -> do
+            notifyOther "fold"
+
+            let u = settleFold t pos
+
+            putStrLn (showBetState u)
+            pure u
+          Check -> do
+            notifyOther "check"
+
+            let u = check t
+
+            putStrLn (showBetState u)
+
+            if stackFor otherPos t == 0
+              || isPreflop
+              || pos == SmallBlind
               then pure (refundUncalled u)
               else continue u
+          Call -> do
+            notifyOther "call"
 
-      dec <- waitForDecision player
+            let amount =
+                  streetFor otherPos t
+                    - streetFor pos t
 
-      when (not (legal t dec)) $
-        error ("illegal action: " ++ show dec)
+                wasRaised =
+                  max
+                    (sbThisStreet t)
+                    (bbThisStreet t)
+                    > bigBlind
 
-      putStrLn $
-        playerName m pos
-          ++ " ("
-          ++ show pos
-          ++ ") chooses "
-          ++ show dec
+                u = payBet t pos False amount
 
-      case dec of
-        Fold -> do
-          notifyOther "fold"
+                someoneAllIn =
+                  sbStack u == 0 || bbStack u == 0
 
-          let u = settleFold t pos
+            putStrLn (showBetState u)
 
-          putStrLn (showBetState u)
-          pure u
-        Check -> do
-          notifyOther "check"
+            if someoneAllIn
+              || not isPreflop
+              || wasRaised
+              then pure (refundUncalled u)
+              else continue u
+          Quarter -> do
+            notifyOther "quarter"
 
-          let u = check t
+            let amount = pot t `div` 4
+                u = payBet t pos True amount
 
-          putStrLn (showBetState u)
+            putStrLn (showBetState u)
+            settleOrContinue u
+          Half -> do
+            notifyOther "half"
 
-          if stackFor otherPos t == 0
-            || isPreflop
-            || pos == SmallBlind
-            then pure (refundUncalled u)
-            else continue u
-        Call -> do
-          notifyOther "call"
+            let amount = pot t `div` 2
+                u = payBet t pos True amount
 
-          let amount =
-                streetFor otherPos t
-                  - streetFor pos t
+            putStrLn (showBetState u)
+            settleOrContinue u
+          Pot -> do
+            notifyOther "pot"
 
-              wasRaised =
-                max
-                  (sbThisStreet t)
-                  (bbThisStreet t)
-                  > bigBlind
+            let amount = pot t
+                u = payBet t pos True amount
 
-              u = payBet t pos False amount
+            putStrLn (showBetState u)
+            settleOrContinue u
+          Raise -> do
+            notifyOther "2.5x"
 
-              someoneAllIn =
-                sbStack u == 0 || bbStack u == 0
+            let opponentPaid =
+                  streetFor otherPos t
 
-          putStrLn (showBetState u)
+                alreadyPaid =
+                  streetFor pos t
 
-          if someoneAllIn
-            || not isPreflop
-            || wasRaised
-            then pure (refundUncalled u)
-            else continue u
-        Quarter -> do
-          notifyOther "quarter"
+                target =
+                  opponentPaid * 5 `div` 2
 
-          let amount = pot t `div` 4
-              u = payBet t pos True amount
+                amount =
+                  target - alreadyPaid
 
-          putStrLn (showBetState u)
-          settleOrContinue u
-        Half -> do
-          notifyOther "half"
+                u = payBet t pos True amount
 
-          let amount = pot t `div` 2
-              u = payBet t pos True amount
+            putStrLn (showBetState u)
+            settleOrContinue u
+          AllIn -> do
+            notifyOther "all-in"
 
-          putStrLn (showBetState u)
-          settleOrContinue u
-        Pot -> do
-          notifyOther "pot"
+            let stack = stackFor pos t
+                u = payBet t pos False stack
 
-          let amount = pot t
-              u = payBet t pos True amount
-
-          putStrLn (showBetState u)
-          settleOrContinue u
-        Raise -> do
-          notifyOther "2.5x"
-
-          let opponentPaid =
-                streetFor otherPos t
-
-              alreadyPaid =
-                streetFor pos t
-
-              target =
-                opponentPaid * 5 `div` 2
-
-              amount =
-                target - alreadyPaid
-
-              u = payBet t pos True amount
-
-          putStrLn (showBetState u)
-          settleOrContinue u
-        AllIn -> do
-          notifyOther "all-in"
-
-          let stack = stackFor pos t
-              u = payBet t pos False stack
-
-          putStrLn (showBetState u)
-          settleOrContinue u
+            putStrLn (showBetState u)
+            settleOrContinue u
 
 playPreflop :: Match -> State -> Engine -> Engine -> IO State
 playPreflop m s firstEngine secondEngine =
@@ -569,10 +577,18 @@ runMatch = do
 
       m = Match {firstPos = pos, state = s}
 
-  continueMatch m
+  continueMatch m 1
   where
-    continueMatch :: Match -> IO ()
-    continueMatch m = do
+    continueMatch :: Match -> Int -> IO ()
+    continueMatch m num = do
+      putStrLn (replicate 50 '=')
+      putStrLn ("STARTING HAND #" ++ show num)
+
+      putStrLn ""
+
+      putStrLn ("First Player: " ++ firstPath)
+      putStrLn ("Second Player: " ++ secondPath)
+
       putStrLn ""
       putStrLn $
         "Stacks before hand - First "
@@ -580,7 +596,9 @@ runMatch = do
           ++ " | Second "
           ++ show (secondStack m)
 
-      endState <- runHand m
+      putStrLn ""
+
+      endState <- runHand m num
 
       let finishedMatch = m {state = endState}
 
@@ -589,6 +607,8 @@ runMatch = do
           ++ show (firstStack finishedMatch)
           ++ " | Second "
           ++ show (secondStack finishedMatch)
+      putStrLn (replicate 50 '=')
+      putStrLn ""
 
       if firstStack finishedMatch == 0
         then putStrLn "Second player wins"
@@ -608,10 +628,10 @@ runMatch = do
                         state = nextState
                       }
 
-              continueMatch nextMatch
+              continueMatch nextMatch (num + 1)
 
-runHand :: Match -> IO State
-runHand m = do
+runHand :: Match -> Int -> IO State
+runHand m num = do
   firstEngine <- startEngine firstPath
   secondEngine <- startEngine secondPath
 
@@ -660,8 +680,8 @@ playHand m firstEngine secondEngine = do
 
   initHand m afterBB firstEngine secondEngine
 
-  putStrLn ("First hand:  " ++ firstHand)
-  putStrLn ("Second hand: " ++ secondHand)
+  putStrLn ("First hand (" ++ show (firstPos m) ++ "): " ++ firstHand)
+  putStrLn ("Second hand (" ++ show (opponent (firstPos m)) ++ "): " ++ secondHand)
   putStrLn ("Blinds: " ++ showBetState afterBB)
 
   endOfPreflop <-

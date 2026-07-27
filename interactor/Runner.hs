@@ -550,7 +550,42 @@ secondStack m =
     SmallBlind -> bbStack (state m)
     BigBlind -> sbStack (state m)
 
-runMatch :: IO ()
+-- series of `matches_to_play` matches
+-- data Series = Series {firstWins :: Int, secondWins :: Int, matchesToPlay :: Int}
+
+runSeries :: Int -> IO Series
+runSeries n = do
+  let s = Series {firstWins = 0, secondWins = 0, matchesToPlay = n}
+  nextMatch s
+  where
+    nextMatch :: Series -> IO Series
+    nextMatch s =
+      let matchNum = firstWins s + secondWins s + 1
+       in if matchNum > matchesToPlay s
+            then pure s
+            else do
+              putStrLn ""
+              putStrLn (replicate 50 '/')
+              putStrLn (replicate 50 '/')
+              putStrLn ""
+              putStrLn ("STARTING MATCH " ++ (show matchNum) ++ " of " ++ show (matchesToPlay s))
+              putStrLn ""
+              result <- runMatch
+              case result of
+                FirstWins -> do
+                  putStrLn ("First player (" ++ firstPath ++ ") wins match " ++ show (firstWins s + secondWins s + 1))
+                  putStrLn ("Score is " ++ show ((firstWins s) + 1) ++ "-" ++ show (secondWins s))
+                  putStrLn (replicate 50 '/')
+                  putStrLn (replicate 50 '/')
+                  nextMatch s {firstWins = firstWins s + 1}
+                SecondWins -> do
+                  putStrLn ("Second player (" ++ secondPath ++ ") wins match " ++ show (firstWins s + secondWins s + 1))
+                  putStrLn ("Score is " ++ show (firstWins s) ++ "-" ++ show ((secondWins s) + 1))
+                  putStrLn (replicate 50 '/')
+                  putStrLn (replicate 50 '/')
+                  nextMatch s {secondWins = secondWins s + 1}
+
+runMatch :: IO Outcome
 runMatch = do
   t <- getPOSIXTime
 
@@ -560,8 +595,8 @@ runMatch = do
             maxBet = 0,
             bbThisStreet = 0,
             sbThisStreet = 0,
-            bbStack = 100,
-            sbStack = 100,
+            bbStack = startingStack,
+            sbStack = startingStack,
             outcome = Nothing,
             turn = SmallBlind,
             deck = cards,
@@ -579,7 +614,7 @@ runMatch = do
 
   continueMatch m 1
   where
-    continueMatch :: Match -> Int -> IO ()
+    continueMatch :: Match -> Int -> IO Outcome
     continueMatch m num = do
       putStrLn (replicate 50 '=')
       putStrLn ("STARTING HAND #" ++ show num)
@@ -611,10 +646,14 @@ runMatch = do
       putStrLn ""
 
       if firstStack finishedMatch == 0
-        then putStrLn "Second player wins"
+        then do
+          putStrLn "Second player wins"
+          pure SecondWins
         else
           if secondStack finishedMatch == 0
-            then putStrLn "First player wins"
+            then do
+              putStrLn "First player wins"
+              pure FirstWins
             else do
               let nextState =
                     endState

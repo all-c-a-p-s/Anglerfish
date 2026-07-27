@@ -124,6 +124,9 @@ smallBlind = 1
 bigBlind :: Int
 bigBlind = 2
 
+startingStack :: Int
+startingStack = 200
+
 data Position = SmallBlind | BigBlind deriving (Show, Eq)
 
 -- Match = one set of hands until a player's stack reaches zero

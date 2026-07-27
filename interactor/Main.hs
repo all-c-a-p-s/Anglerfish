@@ -8,4 +8,22 @@ import Runner
 
 main :: IO ()
 main = do
-  runMatch
+  seriesResult <- runSeries 10
+
+  putStrLn ""
+  putStrLn ""
+
+  putStrLn ("FINAL RESULT:")
+  putStrLn
+    ( "("
+        ++ firstPath
+        ++ " "
+        ++ show (firstWins seriesResult)
+        ++ ") - ("
+        ++ secondPath
+        ++ " "
+        ++ show (secondWins seriesResult)
+        ++ ")"
+    )
+
+  pure ()

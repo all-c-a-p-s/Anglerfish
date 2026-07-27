@@ -25,5 +25,9 @@ main = do
         ++ show (secondWins seriesResult)
         ++ ")"
     )
+  let eloDiff = approxEloDiff (firstWins seriesResult) (secondWins seriesResult)
+      eloDiffString = ((if eloDiff > 0 then "+" else "") ++ show eloDiff)
+
+  putStrLn ("Approx. ELO diff of second player vs. first player: " ++ eloDiffString)
 
   pure ()

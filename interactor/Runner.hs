@@ -550,8 +550,30 @@ secondStack m =
     SmallBlind -> bbStack (state m)
     BigBlind -> sbStack (state m)
 
--- series of `matches_to_play` matches
--- data Series = Series {firstWins :: Int, secondWins :: Int, matchesToPlay :: Int}
+expectedScore :: Int -> Float
+expectedScore eloDiff =
+  1 / (1 + 10 ** (fromIntegral (-eloDiff) / 400))
+
+-- binary search to find elo diff corresponding to match result
+-- we give it as second player relative to first player
+approxEloDiff :: Int -> Int -> Int
+approxEloDiff firstScore secondScore =
+  help (-1000) 1000
+  where
+    score :: Float
+    score =
+      fromIntegral secondScore
+        / fromIntegral (secondScore + firstScore)
+
+    help :: Int -> Int -> Int
+    help lo hi =
+      if lo + 1 >= hi
+        then lo
+        else
+          let mid = lo + ((hi - lo) `div` 2)
+           in if expectedScore mid > score
+                then help lo mid
+                else help mid hi
 
 runSeries :: Int -> IO Series
 runSeries n = do

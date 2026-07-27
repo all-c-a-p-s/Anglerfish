@@ -594,3 +594,113 @@ impl GameState {
         self.board_len += 1;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+
+    use crate::play::Parseable;
+
+    use super::*;
+
+    macro_rules! hand {
+        ($name:ident, $($card:expr),+ $(,)?) => {
+            let mut $name = CardSet::BLANK;
+            $(
+                $name.update_with(Card::parse($card));
+            )+
+        };
+    }
+
+    #[test]
+    fn test_hand_ranks() {
+        hand!(royal, "As", "Ks", "Qs", "Js", "Ts");
+        hand!(steel_wheel, "As", "2s", "3s", "4s", "5s");
+
+        hand!(quad_aces, "As", "Ah", "Ad", "Ac", "Ts");
+        hand!(worse_quad_aces, "As", "Ah", "Ad", "Ac", "3s");
+        hand!(quad_deuces, "2s", "2h", "2d", "2c", "Ts");
+
+        hand!(aces_full_of_deuces, "As", "Ah", "Ad", "2c", "2s");
+        hand!(also_aces_full_of_deuces, "2c", "2s", "2d", "As", "Ad", "Ah");
+        hand!(kings_full_of_queens, "Ks", "Kh", "Kd", "Qc", "Qs");
+
+        hand!(ace_high_flush, "As", "2s", "Qs", "Js", "Ts");
+        hand!(king_high_flush, "Ks", "2s", "Qs", "Js", "Ts");
+
+        hand!(ace_high_straight, "As", "Kc", "Qs", "Js", "Ts");
+        hand!(king_high_straight, "9s", "Kc", "Qs", "Js", "Ts");
+
+        hand!(three_aces, "As", "Ah", "Ad", "Jc", "Ts");
+        hand!(three_deuces, "2s", "2h", "2d", "5c", "Ts");
+
+        hand!(aces_and_deuces, "As", "Ah", "2s", "2h", "Ks");
+        hand!(kings_and_queens, "Ks", "Kh", "Qs", "Qh", "9s");
+        hand!(three_pair, "Ks", "Kh", "Qs", "Qh", "9s", "9h");
+
+        hand!(pair_aces, "As", "Ah", "Ks", "Qs", "Js");
+        hand!(worse_pair_aces, "As", "Ah", "Qs", "Js", "Ts");
+        hand!(pair_kings, "Ks", "Kh", "As", "Qs", "Js");
+
+        hand!(ace_high, "As", "Ks", "Qs", "Js", "9d");
+        hand!(different_suits, "Ad", "Kd", "Qd", "Jd", "9s");
+
+        assert!(royal > steel_wheel);
+
+        assert!(steel_wheel > quad_aces);
+        assert!(quad_aces > worse_quad_aces);
+        assert!(worse_quad_aces > quad_deuces);
+
+        assert!(quad_deuces > aces_full_of_deuces);
+        assert!(aces_full_of_deuces > kings_full_of_queens);
+        assert_eq!(aces_full_of_deuces.cmp(&also_aces_full_of_deuces), Ordering::Equal);
+
+        assert!(kings_full_of_queens > ace_high_flush);
+        assert!(ace_high_flush > king_high_flush);
+
+        assert!(king_high_flush > ace_high_straight);
+        assert!(ace_high_straight > king_high_straight);
+
+        assert!(king_high_straight > three_aces);
+        assert!(three_aces > three_deuces);
+
+        assert!(three_deuces > aces_and_deuces);
+        assert!(aces_and_deuces > kings_and_queens);
+        assert_eq!(kings_and_queens.cmp(&three_pair), Ordering::Equal);
+
+        assert!(kings_and_queens > pair_aces);
+        assert!(pair_aces > worse_pair_aces);
+        assert!(worse_pair_aces > pair_kings);
+
+        assert!(pair_kings > ace_high);
+        assert_eq!(ace_high.cmp(&different_suits), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_sevens() {
+        hand!(royal_5, "As", "Ks", "Qs", "Js", "Ts");
+        hand!(royal_7, "As", "Ks", "Qs", "Js", "Ts", "2h", "3d",);
+
+        hand!(quad_aces_5, "As", "Ah", "Ad", "Ac", "Ts");
+        hand!(quad_aces_7, "As", "Ah", "Ad", "Ac", "Ts", "2h", "3d",);
+
+        hand!(ace_high_flush_5, "As", "Qs", "Js", "Ts", "2s");
+        hand!(ace_high_flush_7, "As", "Qs", "Js", "Ts", "2s", "3h", "7d",);
+
+        hand!(three_aces_5, "As", "Ah", "Ad", "Jc", "Ts");
+        hand!(three_aces_7, "As", "Ah", "Ad", "Jc", "Ts", "2h", "3d",);
+
+        hand!(aces_and_deuces_5, "As", "Ah", "2s", "2h", "Ks");
+        hand!(aces_and_deuces_7, "As", "Ah", "2s", "2h", "Ks", "3c", "4d",);
+
+        hand!(pair_aces_5, "As", "Ah", "Ks", "Qs", "Js");
+        hand!(pair_aces_7, "As", "Ah", "Ks", "Qs", "Js", "2c", "3d",);
+
+        assert_eq!(royal_5.cmp(&royal_7), Ordering::Equal);
+        assert_eq!(quad_aces_5.cmp(&quad_aces_7), Ordering::Equal);
+        assert_eq!(ace_high_flush_5.cmp(&ace_high_flush_7), Ordering::Equal);
+        assert_eq!(three_aces_5.cmp(&three_aces_7), Ordering::Equal);
+        assert_eq!(aces_and_deuces_5.cmp(&aces_and_deuces_7), Ordering::Equal);
+        assert_eq!(pair_aces_5.cmp(&pair_aces_7), Ordering::Equal);
+    }
+}

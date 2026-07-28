@@ -418,9 +418,8 @@ fn weighted_child_value<const N: usize>(
     value
 }
 
-static POLICY_TEMPERATURE: AtomicI32 = AtomicI32::new(10_000);
-
-static RANGE_TEMPERATURE: AtomicI32 = AtomicI32::new(1_000);
+static POLICY_TEMPERATURE: AtomicI32 = AtomicI32::new(9_000);
+static RANGE_TEMPERATURE: AtomicI32 = AtomicI32::new(9_000);
 
 const TEMP_SCALE: f64 = 1_000.0;
 
@@ -442,8 +441,20 @@ pub fn range_temperature() -> f64 {
     RANGE_TEMPERATURE.load(Relaxed) as f64 / TEMP_SCALE
 }
 
-fn update_probs<const N: usize, const RANGING: bool>(probs: &mut [f64; N], legal: &[bool; N], child_evs: &[f64; N]) {
-    let temperature = if RANGING { range_temperature() } else { policy_temperature() };
+fn confidence_scale(visits: u32) -> f64 {
+    const K: f64 = 10.0;
+    1.0 + K / (1.0 + visits as f64).sqrt()
+}
+
+fn update_probs<const N: usize, const RANGING: bool>(
+    probs: &mut [f64; N],
+    legal: &[bool; N],
+    child_evs: &[f64; N],
+    visits: u32,
+) {
+    let base_temp = if RANGING { range_temperature() } else { policy_temperature() };
+
+    let effective_temp = base_temp * confidence_scale(visits);
 
     let max_ev = (0..N).filter(|&i| legal[i]).map(|i| child_evs[i]).fold(f64::NEG_INFINITY, f64::max);
 
@@ -451,7 +462,7 @@ fn update_probs<const N: usize, const RANGING: bool>(probs: &mut [f64; N], legal
 
     for i in 0..N {
         if legal[i] {
-            probs[i] = ((child_evs[i] - max_ev) / temperature).exp();
+            probs[i] = ((child_evs[i] - max_ev) / effective_temp).exp();
             total += probs[i];
         } else {
             probs[i] = 0.0;
@@ -523,7 +534,6 @@ const RANGE_UPDATE_DEPTH: usize = 2;
 const NUM_PLAYOUTS: usize = 1024;
 const HAND_COUNT: usize = Card::NUM * (Card::NUM - 1) / 2;
 const HAND_BATCH_SIZE: usize = HAND_COUNT;
-const NUM_RANGE_PASSES: usize = 4;
 
 pub fn inspect_range_summary(name: &str, state: &GameState, range: &Range) {
     const NUM_SHOWN: usize = 10;
@@ -661,9 +671,13 @@ impl GameState {
         println!("INFO generated game tree");
         println!("INFO node count {}", root.node_count());
 
+        let preflop = self.streets_remaining() == 4;
+
         let cached_runouts = self.cached_runouts(NUM_PLAYOUTS);
 
-        for pass_idx in 0..NUM_RANGE_PASSES {
+        let passes = if preflop { 8 } else { 4 };
+
+        for pass_idx in 0..passes {
             root.update_subtree_ranges(
                 self.board,
                 self.seen,
@@ -673,7 +687,7 @@ impl GameState {
                 &cached_runouts,
             );
 
-            println!("INFO completed range pass {}/{}", pass_idx + 1, NUM_RANGE_PASSES,);
+            println!("INFO completed range pass {}/{}", pass_idx + 1, passes);
         }
 
         root
@@ -681,11 +695,14 @@ impl GameState {
 
     /// Does runouts with the actual hero hand, using all the ranging that has been done
     /// previously.
-    pub fn do_runouts(&self) -> Node {
-        let mut root = self.build_ranged_tree();
+    pub fn do_runouts(&self) -> (Node, Node) {
+        let mut policy_root = self.build_ranged_tree();
+
+        let range_root = policy_root.clone();
+
         let mut rng = XorShiftU64::new();
 
-        for _ in 0..NUM_PLAYOUTS * 10 {
+        for _ in 0..NUM_PLAYOUTS * 16 {
             let runout = self.gen_runout();
 
             let hero_mask = CARD_MASKS[self.hero_hand.0] | CARD_MASKS[self.hero_hand.1];
@@ -693,10 +710,10 @@ impl GameState {
             let hero_seen = runout.seen;
             let public_seen = runout.seen & !hero_mask;
 
-            root.playout_from_root_with_runout(&mut rng, self.hero_hand, runout.board, public_seen, hero_seen);
+            policy_root.playout_from_root_with_runout(&mut rng, self.hero_hand, runout.board, public_seen, hero_seen);
         }
 
-        root
+        (policy_root, range_root)
     }
 
     /// Generates policy for each possible hand
@@ -1180,7 +1197,7 @@ impl Node {
                     value.for_player(node_position, root_position)
                 });
 
-                update_probs::<_, false>(&mut actions.probs, &actions.legal, &child_evs);
+                update_probs::<_, false>(&mut actions.probs, &actions.legal, &child_evs, previous_value.visits);
 
                 weighted_child_value(&actions.probs, &actions.legal, |i| {
                     let value = children[i].value;
@@ -1202,7 +1219,7 @@ impl Node {
                     value.for_player(node_position, root_position)
                 });
 
-                update_probs::<_, false>(&mut actions.probs, &actions.legal, &child_evs);
+                update_probs::<_, false>(&mut actions.probs, &actions.legal, &child_evs, previous_value.visits);
 
                 weighted_child_value(&actions.probs, &actions.legal, |i| {
                     let value = children[i].value;
@@ -1406,7 +1423,7 @@ impl Node {
 
                 let child_evs = child_values.map(|value| value.for_player(node_position, root_position));
 
-                update_probs::<_, true>(&mut probs, &actions.legal, &child_evs);
+                update_probs::<_, true>(&mut probs, &actions.legal, &child_evs, previous_value.visits);
 
                 let mut value = weighted_child_value(&probs, &actions.legal, |i| child_values[i]);
 
@@ -1422,7 +1439,7 @@ impl Node {
 
                 let child_evs = child_values.map(|value| value.for_player(node_position, root_position));
 
-                update_probs::<_, true>(&mut probs, &actions.legal, &child_evs);
+                update_probs::<_, true>(&mut probs, &actions.legal, &child_evs, previous_value.visits);
 
                 let mut value = weighted_child_value(&probs, &actions.legal, |i| child_values[i]);
 

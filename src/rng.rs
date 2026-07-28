@@ -8,7 +8,7 @@ pub struct XorShiftU64 {
 const SEED: u128 = 0xF8D1C463A579BE02;
 
 impl XorShiftU64 {
-    const EXPLORATION: f64 = 0.5;
+    const EXPLORATION: f64 = 0.1;
 
     pub fn new() -> Self {
         Self { state: (UNIX_EPOCH.elapsed().unwrap().as_nanos() % SEED) as u64 }

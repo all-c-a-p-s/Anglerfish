@@ -1,6 +1,6 @@
 use crate::game::{CARD_MASKS, Card, CardSet, ChipState, GameState, Hand, Outcome, Position, Rank, Suit};
 use crate::rng::XorShiftU64;
-use crate::search::{Actions, Node, Range, inspect_range_summary, set_range_temperature};
+use crate::search::{Actions, Node, Range, inspect_range_summary};
 
 use std::io;
 use std::time::Instant;
@@ -15,22 +15,23 @@ pub struct AppliedAction {
 
 fn print_results(root: &Node) {
     println!("\nROOT ACTIONS");
-    println!("{:<10} {:>7} {:>12} {:>14}", "Action", "Legal", "Probability", "Estimated EV",);
-    println!("{}", "-".repeat(47));
+    println!("{:<10} {:>7} {:>12} {:>10} {:>14}", "Action", "Legal", "Probability", "Visits", "Estimated EV",);
+    println!("{}", "-".repeat(58));
 
     match root.actions.as_ref().expect("root should not be terminal") {
         Actions::Even(actions) => {
             let children = actions.children.as_ref().expect("generated node should have children");
 
             for (i, name) in EVEN_NAMES.iter().enumerate() {
-                let action_ev = children[i].value.hero_ev;
+                let value = children[i].value;
 
                 println!(
-                    "{:<10} {:>7} {:>11.2}% {:>14.3}",
+                    "{:<10} {:>7} {:>11.2}% {:>10} {:>14.3}",
                     name,
                     actions.legal[i],
                     100.0 * actions.probs[i],
-                    action_ev,
+                    value.visits,
+                    value.hero_ev,
                 );
             }
         }
@@ -39,14 +40,15 @@ fn print_results(root: &Node) {
             let children = actions.children.as_ref().expect("generated node should have children");
 
             for (i, name) in BEHIND_NAMES.iter().enumerate() {
-                let action_ev = children[i].value.hero_ev;
+                let value = children[i].value;
 
                 println!(
-                    "{:<10} {:>7} {:>11.2}% {:>14.3}",
+                    "{:<10} {:>7} {:>11.2}% {:>10} {:>14.3}",
                     name,
                     actions.legal[i],
                     100.0 * actions.probs[i],
-                    action_ev,
+                    value.visits,
+                    value.hero_ev,
                 );
             }
         }
@@ -55,17 +57,17 @@ fn print_results(root: &Node) {
     println!();
 }
 
-fn solve(gs: &GameState) -> Node {
+fn solve(gs: &GameState) -> (Node, Node) {
     let start = Instant::now();
 
     println!("{gs}");
 
-    let root = gs.do_runouts();
+    let (policy_root, range_root) = gs.do_runouts();
 
     println!("INFO analysis took: {:?}", start.elapsed());
-    print_results(&root);
+    print_results(&policy_root);
 
-    root
+    (policy_root, range_root)
 }
 
 fn action_name(root: &Node, choice: usize) -> &'static str {
@@ -103,12 +105,13 @@ fn apply_action(gs: &mut GameState, root: &Node, choice: usize) -> AppliedAction
 }
 
 pub fn play_from(gs: &mut GameState) -> AppliedAction {
-    let policy_root = solve(gs);
+    let (policy_root, range_root) = solve(gs);
 
     let mut rng = XorShiftU64::new();
 
     let (choice, probability) = match policy_root.actions.as_ref().expect("root should not be terminal") {
         Actions::Even(actions) => rng.choose_action(&actions.probs),
+
         Actions::Behind(actions) => rng.choose_action(&actions.probs),
     };
 
@@ -117,14 +120,6 @@ pub fn play_from(gs: &mut GameState) -> AppliedAction {
         action_name(&policy_root, choice),
         100.0 * probability,
     );
-
-    let start = Instant::now();
-
-    set_range_temperature(2.0);
-    let range_root = gs.build_ranged_tree();
-    set_range_temperature(1.0);
-
-    println!("INFO range analysis took: {:?}", start.elapsed(),);
 
     apply_action(gs, &range_root, choice)
 }
@@ -181,9 +176,7 @@ fn receive_opponent_action(gs: &mut GameState) -> AppliedAction {
 
     println!("{gs}");
 
-    set_range_temperature(2.0);
     let root = gs.build_ranged_tree();
-    set_range_temperature(1.0);
 
     println!("INFO range analysis took: {:?}", start.elapsed(),);
     println!("INFO waiting to receive opponent action");
@@ -318,7 +311,7 @@ impl Parseable for ChipState {
     }
 }
 
-const INSPECT_RANGES: bool = true;
+const INSPECT_RANGES: bool = false;
 
 pub fn hand_loop() {
     println!("INFO waiting to receive chip state after blinds (sb [stack] [bet] bb [stack] [bet])");

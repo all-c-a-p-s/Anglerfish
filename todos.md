@@ -1,2 +1,0 @@
-- make sure you can't fold when already all in
-- don't raise when opponent all in : only fold, call or shove

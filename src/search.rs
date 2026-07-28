@@ -5,6 +5,7 @@ use crate::hash::EquivalenceHash;
 use crate::rng::XorShiftU64;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
 
 /// Big search file!!!
 /// Generally, there are two parts:
@@ -53,6 +54,7 @@ pub struct Node {
     pub bb_range: Rc<Range>,
     pub streets_remaining: u8,
     pub actions_this_street: u8,
+    pub value: NodeValue,
 }
 
 /// Similar to the concept of a "range" that humans use when playing poker.
@@ -330,15 +332,12 @@ impl Range {
 #[derive(Debug, Clone)]
 pub struct EvenActions {
     pub probs: [f64; 5],
-    pub total_ev: [f64; 5],
-    pub visits: [u32; 5],
     pub legal: [bool; 5],
     pub children: Option<[Box<Node>; 5]>,
 }
 
 impl EvenActions {
-    pub const BLANK: Self =
-        Self { probs: [0.2; 5], total_ev: [0.0; 5], visits: [0; 5], legal: [true; 5], children: None };
+    pub const BLANK: Self = Self { probs: [0.2; 5], legal: [true; 5], children: None };
 }
 
 /// (2) Opponent's betting lead:
@@ -349,15 +348,12 @@ impl EvenActions {
 #[derive(Debug, Clone)]
 pub struct BehindActions {
     pub probs: [f64; 4],
-    pub total_ev: [f64; 4],
-    pub visits: [u32; 4],
     pub legal: [bool; 4],
     pub children: Option<[Box<Node>; 4]>,
 }
 
 impl BehindActions {
-    pub const BLANK: Self =
-        Self { probs: [0.25; 4], total_ev: [0.0; 4], visits: [0; 4], legal: [true; 4], children: None };
+    pub const BLANK: Self = Self { probs: [0.25; 4], legal: [true; 4], children: None };
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -373,51 +369,110 @@ pub enum Actions {
     Behind(BehindActions),
 }
 
-fn update_probs<const N: usize>(
-    probs: &mut [f64; N],
-    total_ev: &mut [f64; N],
-    visits: &mut [u32; N],
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NodeValue {
+    pub hero_ev: f64,
+    pub villain_ev: f64,
+    pub visits: u32,
+}
+
+impl NodeValue {
+    fn sample(hero_ev: f64, villain_ev: f64) -> Self {
+        Self { hero_ev, villain_ev, visits: 1 }
+    }
+
+    fn initialized(self) -> bool {
+        self.visits > 0
+    }
+
+    fn observe(&mut self, hero_ev: f64, villain_ev: f64) {
+        self.visits += 1;
+        let n = self.visits as f64;
+
+        self.hero_ev += (hero_ev - self.hero_ev) / n;
+        self.villain_ev += (villain_ev - self.villain_ev) / n;
+    }
+
+    fn for_player(self, node_position: Position, root_position: Position) -> f64 {
+        if node_position == root_position { self.hero_ev } else { self.villain_ev }
+    }
+}
+
+fn weighted_child_value<const N: usize>(
+    probs: &[f64; N],
     legal: &[bool; N],
-    choice: usize,
-    action_ev: f64,
-) {
-    const LR: f64 = 0.001;
+    mut child_value: impl FnMut(usize) -> NodeValue,
+) -> NodeValue {
+    let mut value = NodeValue::default();
 
-    assert!(legal[choice]);
-
-    // baseline := estimate of expected value of parent node
-    // based on mean ev of children and probabilities
-    let baseline: f64 = (0..N)
-        .filter(|&i| legal[i])
-        .map(|i| {
-            let avg = if visits[i] > 0 { total_ev[i] / visits[i] as f64 } else { 0.0 };
-            probs[i] * avg
-        })
-        .sum();
-
-    total_ev[choice] += action_ev;
-    visits[choice] += 1;
-
-    let advantage = action_ev - baseline;
-
-    // increase/decrease all probabilities based on performance of this action relative to baseline
     for i in 0..N {
         if !legal[i] {
             continue;
         }
-        if i == choice {
-            probs[i] += LR * advantage * (1.0 - probs[i]);
-        } else {
-            probs[i] -= LR * advantage * probs[i];
-        }
+
+        let child = child_value(i);
+        value.hero_ev += probs[i] * child.hero_ev;
+        value.villain_ev += probs[i] * child.villain_ev;
     }
 
-    let floor = 1e-6;
-    for p in probs.iter_mut() {
-        *p = p.max(floor);
+    value
+}
+
+static POLICY_LR: AtomicI32 = AtomicI32::new(100);
+static RANGE_LR: AtomicI32 = AtomicI32::new(1000);
+
+const LR_SCALE: f64 = 1e6;
+
+pub fn set_policy_lr(k: f64) {
+    let unscaled = (k * LR_SCALE).round() as i32;
+    POLICY_LR.store(unscaled, Relaxed);
+}
+
+pub fn policy_lr() -> f64 {
+    let unscaled = POLICY_LR.load(Relaxed);
+    unscaled as f64 / LR_SCALE
+}
+
+pub fn set_range_lr(k: f64) {
+    let unscaled = (k * LR_SCALE).round() as i32;
+    RANGE_LR.store(unscaled, Relaxed);
+}
+
+pub fn range_lr() -> f64 {
+    let unscaled = RANGE_LR.load(Relaxed);
+    unscaled as f64 / LR_SCALE
+}
+
+fn update_probs<const N: usize, const RANGING: bool>(
+    probs: &mut [f64; N],
+    legal: &[bool; N],
+    choice: usize,
+    action_ev: f64,
+    baseline: f64,
+) {
+    let lr = if RANGING { range_lr() } else { policy_lr() };
+    const FLOOR: f64 = 1e-6;
+
+    assert!(legal[choice]);
+
+    let advantage = action_ev - baseline;
+
+    for i in 0..N {
+        if !legal[i] {
+            continue;
+        }
+
+        if i == choice {
+            probs[i] += lr * advantage * (1.0 - probs[i]);
+        } else {
+            probs[i] -= lr * advantage * probs[i];
+        }
+
+        probs[i] = probs[i].max(FLOOR);
     }
 
     let total: f64 = (0..N).filter(|&i| legal[i]).map(|i| probs[i]).sum();
+
     for i in 0..N {
         probs[i] = if legal[i] { probs[i] / total } else { 0.0 };
     }
@@ -428,11 +483,20 @@ pub enum HandPolicies {
     Behind([[[f64; 4]; Card::NUM]; Card::NUM]),
 }
 
-/// Stores action probabilities, which are calculated/updated using running average EV.
+/// Stores the private policy and cached value of one node for one possible hand.
 #[derive(Clone, Copy)]
 enum NodePolicyStats {
-    Even { probs: [f64; 5], total_ev: [f64; 5], visits: [u32; 5] },
-    Behind { probs: [f64; 4], total_ev: [f64; 4], visits: [u32; 4] },
+    Even { probs: [f64; 5], value: NodeValue },
+    Behind { probs: [f64; 4], value: NodeValue },
+    Terminal { value: NodeValue },
+}
+
+impl NodePolicyStats {
+    fn value(self) -> NodeValue {
+        match self {
+            Self::Even { value, .. } | Self::Behind { value, .. } | Self::Terminal { value } => value,
+        }
+    }
 }
 
 /// For any hand, caches NodePolicyState for each node in the game tree.
@@ -445,7 +509,7 @@ impl HandPolicyState {
     fn even_probs(&self, node: &Node) -> [f64; 5] {
         match self.stats.get(&Node::policy_key(node)) {
             Some(NodePolicyStats::Even { probs, .. }) => *probs,
-            Some(NodePolicyStats::Behind { .. }) => unreachable!(),
+            Some(NodePolicyStats::Behind { .. } | NodePolicyStats::Terminal { .. }) => unreachable!(),
             None => match node.actions.as_ref().unwrap() {
                 Actions::Even(actions) => actions.probs,
                 Actions::Behind(_) => unreachable!(),
@@ -456,12 +520,16 @@ impl HandPolicyState {
     fn behind_probs(&self, node: &Node) -> [f64; 4] {
         match self.stats.get(&Node::policy_key(node)) {
             Some(NodePolicyStats::Behind { probs, .. }) => *probs,
-            Some(NodePolicyStats::Even { .. }) => unreachable!(),
+            Some(NodePolicyStats::Even { .. } | NodePolicyStats::Terminal { .. }) => unreachable!(),
             None => match node.actions.as_ref().unwrap() {
                 Actions::Behind(actions) => actions.probs,
                 Actions::Even(_) => unreachable!(),
             },
         }
+    }
+
+    fn value(&self, node: &Node) -> Option<NodeValue> {
+        self.stats.get(&Node::policy_key(node)).copied().map(NodePolicyStats::value)
     }
 }
 
@@ -1112,7 +1180,7 @@ impl Node {
         (hero_pov_ev, villain_pov_ev)
     }
 
-    /// Propagates result of playout to update probabilities.
+    /// Propagates a playout result from the terminal node back to the root.
     fn apply_playout_result(
         &mut self,
         choices: Vec<usize>,
@@ -1121,42 +1189,76 @@ impl Node {
         hero_equity: f64,
         range_equity: f64,
     ) {
-        let (hero_pov_ev, villain_pov_ev) = self.calc_evs(result, outcome, hero_equity, range_equity);
         let root_position = self.position;
+        let (hero_ev, villain_ev) = self.calc_evs(result, outcome, hero_equity, range_equity);
+        let sample = NodeValue::sample(hero_ev, villain_ev);
 
-        let mut node = self;
+        self.backup_playout_result(&choices, root_position, sample);
+    }
 
-        for choice in choices {
-            let player_ev = if node.position == root_position { hero_pov_ev } else { villain_pov_ev };
-
-            let next_node = match node.actions.as_mut().unwrap() {
-                Actions::Even(actions) => {
-                    update_probs::<_>(
-                        &mut actions.probs,
-                        &mut actions.total_ev,
-                        &mut actions.visits,
-                        &actions.legal,
-                        choice,
-                        player_ev,
-                    );
-                    actions.children.as_mut().unwrap()[choice].as_mut()
-                }
-
-                Actions::Behind(actions) => {
-                    update_probs::<_>(
-                        &mut actions.probs,
-                        &mut actions.total_ev,
-                        &mut actions.visits,
-                        &actions.legal,
-                        choice,
-                        player_ev,
-                    );
-                    actions.children.as_mut().unwrap()[choice].as_mut()
-                }
-            };
-
-            node = next_node;
+    /// Update the terminal average, then recompute cached node values while unwinding.
+    fn backup_playout_result(&mut self, choices: &[usize], root_position: Position, sample: NodeValue) -> NodeValue {
+        if choices.is_empty() {
+            self.value.observe(sample.hero_ev, sample.villain_ev);
+            return self.value;
         }
+
+        let choice = choices[0];
+        let node_position = self.position;
+        let previous_value = self.value;
+        let fallback = if previous_value.initialized() { previous_value } else { sample };
+
+        let mut new_value = match self.actions.as_mut().unwrap() {
+            Actions::Even(actions) => {
+                let children = actions.children.as_mut().unwrap();
+                let chosen_value = children[choice].backup_playout_result(&choices[1..], root_position, sample);
+
+                let baseline_value = weighted_child_value(&actions.probs, &actions.legal, |i| {
+                    let value = children[i].value;
+                    if value.initialized() { value } else { fallback }
+                });
+
+                update_probs::<_, false>(
+                    &mut actions.probs,
+                    &actions.legal,
+                    choice,
+                    chosen_value.for_player(node_position, root_position),
+                    baseline_value.for_player(node_position, root_position),
+                );
+
+                weighted_child_value(&actions.probs, &actions.legal, |i| {
+                    let value = children[i].value;
+                    if value.initialized() { value } else { fallback }
+                })
+            }
+
+            Actions::Behind(actions) => {
+                let children = actions.children.as_mut().unwrap();
+                let chosen_value = children[choice].backup_playout_result(&choices[1..], root_position, sample);
+
+                let baseline_value = weighted_child_value(&actions.probs, &actions.legal, |i| {
+                    let value = children[i].value;
+                    if value.initialized() { value } else { fallback }
+                });
+
+                update_probs::<_, false>(
+                    &mut actions.probs,
+                    &actions.legal,
+                    choice,
+                    chosen_value.for_player(node_position, root_position),
+                    baseline_value.for_player(node_position, root_position),
+                );
+
+                weighted_child_value(&actions.probs, &actions.legal, |i| {
+                    let value = children[i].value;
+                    if value.initialized() { value } else { fallback }
+                })
+            }
+        };
+
+        new_value.visits = previous_value.visits + 1;
+        self.value = new_value;
+        new_value
     }
 
     /// Recursively updates ranges. Basically stuff like:
@@ -1281,7 +1383,7 @@ impl Node {
         }
     }
 
-    /// Update HandPolicyState based on playout outcome.
+    /// Update HandPolicyState based on a playout outcome.
     fn apply_playout_result_to_hand_state(
         &self,
         choices: &[usize],
@@ -1292,45 +1394,100 @@ impl Node {
         range_equity: f64,
     ) {
         let root_position = self.position;
+        let (hero_ev, villain_ev) = self.calc_evs(result, outcome, hero_equity, range_equity);
+        let sample = NodeValue::sample(hero_ev, villain_ev);
 
-        let (hero_pov_ev, villain_pov_ev) = self.calc_evs(result, outcome, hero_equity, range_equity);
-        let mut node = self;
+        self.backup_playout_result_to_hand_state(choices, state, root_position, sample);
+    }
 
-        for &choice in choices {
-            let player_ev = if node.position == root_position { hero_pov_ev } else { villain_pov_ev };
-            let key = Self::policy_key(node);
+    fn backup_playout_result_to_hand_state(
+        &self,
+        choices: &[usize],
+        state: &mut HandPolicyState,
+        root_position: Position,
+        sample: NodeValue,
+    ) -> NodeValue {
+        let key = Self::policy_key(self);
 
-            match node.actions.as_ref().unwrap() {
-                Actions::Even(actions) => {
-                    let stats = state.stats.entry(key).or_insert_with(|| NodePolicyStats::Even {
-                        probs: [0.2; 5],
-                        total_ev: [0.0; 5],
-                        visits: [0; 5],
-                    });
+        if choices.is_empty() {
+            let mut value = match state.stats.get(&key).copied() {
+                Some(NodePolicyStats::Terminal { value }) => value,
+                Some(NodePolicyStats::Even { .. } | NodePolicyStats::Behind { .. }) => unreachable!(),
+                None => NodeValue::default(),
+            };
 
-                    let NodePolicyStats::Even { probs, total_ev, visits } = stats else {
-                        unreachable!();
-                    };
+            value.observe(sample.hero_ev, sample.villain_ev);
+            state.stats.insert(key, NodePolicyStats::Terminal { value });
+            return value;
+        }
 
-                    update_probs::<_>(probs, total_ev, visits, &actions.legal, choice, player_ev);
-                    node = actions.children.as_ref().unwrap()[choice].as_ref();
-                }
+        let choice = choices[0];
+        let node_position = self.position;
 
-                Actions::Behind(actions) => {
-                    let stats = state.stats.entry(key).or_insert_with(|| NodePolicyStats::Behind {
-                        probs: [0.25; 4],
-                        total_ev: [0.0; 4],
-                        visits: [0; 4],
-                    });
+        let chosen_child = match self.actions.as_ref().unwrap() {
+            Actions::Even(actions) => actions.children.as_ref().unwrap()[choice].as_ref(),
+            Actions::Behind(actions) => actions.children.as_ref().unwrap()[choice].as_ref(),
+        };
 
-                    let NodePolicyStats::Behind { probs, total_ev, visits } = stats else {
-                        unreachable!();
-                    };
+        let chosen_value =
+            chosen_child.backup_playout_result_to_hand_state(&choices[1..], state, root_position, sample);
 
-                    update_probs::<_>(probs, total_ev, visits, &actions.legal, choice, player_ev);
-                    node = actions.children.as_ref().unwrap()[choice].as_ref();
-                }
+        let existing = state.stats.get(&key).copied().unwrap_or_else(|| match self.actions.as_ref().unwrap() {
+            Actions::Even(actions) => NodePolicyStats::Even { probs: actions.probs, value: NodeValue::default() },
+            Actions::Behind(actions) => NodePolicyStats::Behind { probs: actions.probs, value: NodeValue::default() },
+        });
+
+        let previous_value = existing.value();
+        let fallback = if previous_value.initialized() { previous_value } else { sample };
+
+        match (self.actions.as_ref().unwrap(), existing) {
+            (Actions::Even(actions), NodePolicyStats::Even { mut probs, value: _ }) => {
+                let children = actions.children.as_ref().unwrap();
+                let baseline_value = weighted_child_value(&probs, &actions.legal, |i| {
+                    state.value(children[i].as_ref()).unwrap_or(fallback)
+                });
+
+                update_probs::<_, true>(
+                    &mut probs,
+                    &actions.legal,
+                    choice,
+                    chosen_value.for_player(node_position, root_position),
+                    baseline_value.for_player(node_position, root_position),
+                );
+
+                let mut value = weighted_child_value(&probs, &actions.legal, |i| {
+                    state.value(children[i].as_ref()).unwrap_or(fallback)
+                });
+                value.visits = previous_value.visits + 1;
+
+                state.stats.insert(key, NodePolicyStats::Even { probs, value });
+                value
             }
+
+            (Actions::Behind(actions), NodePolicyStats::Behind { mut probs, value: _ }) => {
+                let children = actions.children.as_ref().unwrap();
+                let baseline_value = weighted_child_value(&probs, &actions.legal, |i| {
+                    state.value(children[i].as_ref()).unwrap_or(fallback)
+                });
+
+                update_probs::<_, true>(
+                    &mut probs,
+                    &actions.legal,
+                    choice,
+                    chosen_value.for_player(node_position, root_position),
+                    baseline_value.for_player(node_position, root_position),
+                );
+
+                let mut value = weighted_child_value(&probs, &actions.legal, |i| {
+                    state.value(children[i].as_ref()).unwrap_or(fallback)
+                });
+                value.visits = previous_value.visits + 1;
+
+                state.stats.insert(key, NodePolicyStats::Behind { probs, value });
+                value
+            }
+
+            _ => unreachable!(),
         }
     }
 
@@ -1401,6 +1558,7 @@ impl Node {
             bb_range,
             streets_remaining,
             actions_this_street,
+            value: NodeValue::default(),
         }
     }
 

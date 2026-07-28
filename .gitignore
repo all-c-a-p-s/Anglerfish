@@ -2,6 +2,8 @@
 
 /Main
 /interactor/Main
+/interactor/Anglerfish
+/interactor/AnglerfishTest
 /Anglerfish
 /Anglerfish.exe
 
@@ -20,3 +22,5 @@ samply-recording.json
 *.hi
 *.o
 *.hie
+
+todos.md

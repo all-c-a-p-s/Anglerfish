@@ -15,36 +15,38 @@ pub struct AppliedAction {
 
 fn print_results(root: &Node) {
     println!("\nROOT ACTIONS");
-    println!("{:<10} {:>7} {:>12} {:>8} {:>12}", "Action", "Legal", "Probability", "Visits", "Mean EV",);
-    println!("{}", "-".repeat(57));
+    println!("{:<10} {:>7} {:>12} {:>14}", "Action", "Legal", "Probability", "Estimated EV",);
+    println!("{}", "-".repeat(47));
 
     match root.actions.as_ref().expect("root should not be terminal") {
         Actions::Even(actions) => {
+            let children = actions.children.as_ref().expect("generated node should have children");
+
             for (i, name) in EVEN_NAMES.iter().enumerate() {
-                let mean_ev = if actions.visits[i] == 0 { 0.0 } else { actions.total_ev[i] / actions.visits[i] as f64 };
+                let action_ev = children[i].value.hero_ev;
 
                 println!(
-                    "{:<10} {:>7} {:>11.2}% {:>8} {:>12.3}",
+                    "{:<10} {:>7} {:>11.2}% {:>14.3}",
                     name,
                     actions.legal[i],
                     100.0 * actions.probs[i],
-                    actions.visits[i],
-                    mean_ev,
+                    action_ev,
                 );
             }
         }
 
         Actions::Behind(actions) => {
+            let children = actions.children.as_ref().expect("generated node should have children");
+
             for (i, name) in BEHIND_NAMES.iter().enumerate() {
-                let mean_ev = if actions.visits[i] == 0 { 0.0 } else { actions.total_ev[i] / actions.visits[i] as f64 };
+                let action_ev = children[i].value.hero_ev;
 
                 println!(
-                    "{:<10} {:>7} {:>11.2}% {:>8} {:>12.3}",
+                    "{:<10} {:>7} {:>11.2}% {:>14.3}",
                     name,
                     actions.legal[i],
                     100.0 * actions.probs[i],
-                    actions.visits[i],
-                    mean_ev,
+                    action_ev,
                 );
             }
         }
@@ -116,8 +118,6 @@ pub fn play_from(gs: &mut GameState) -> AppliedAction {
         100.0 * probability,
     );
 
-    // Since our opponent probably plays differently to us, we increase the temperature when
-    // considering their range/their perception of our range.
     let start = Instant::now();
     let range_root = gs.build_ranged_tree();
     println!("INFO range analysis took: {:?}", start.elapsed(),);
@@ -177,7 +177,6 @@ fn receive_opponent_action(gs: &mut GameState) -> AppliedAction {
 
     println!("{gs}");
 
-    // As above.
     let root = gs.build_ranged_tree();
 
     println!("INFO range analysis took: {:?}", start.elapsed(),);
@@ -313,7 +312,7 @@ impl Parseable for ChipState {
     }
 }
 
-const INSPECT_RANGES: bool = true;
+const INSPECT_RANGES: bool = false;
 
 pub fn hand_loop() {
     println!("INFO waiting to receive chip state after blinds (sb [stack] [bet] bb [stack] [bet])");

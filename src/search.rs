@@ -418,63 +418,48 @@ fn weighted_child_value<const N: usize>(
     value
 }
 
-static POLICY_LR: AtomicI32 = AtomicI32::new(100);
-static RANGE_LR: AtomicI32 = AtomicI32::new(1000);
+static POLICY_TEMPERATURE: AtomicI32 = AtomicI32::new(10_000);
 
-const LR_SCALE: f64 = 1e6;
+static RANGE_TEMPERATURE: AtomicI32 = AtomicI32::new(1_000);
 
-pub fn set_policy_lr(k: f64) {
-    let unscaled = (k * LR_SCALE).round() as i32;
-    POLICY_LR.store(unscaled, Relaxed);
+const TEMP_SCALE: f64 = 1_000.0;
+
+pub fn set_policy_temperature(k: f64) {
+    let scaled = (k * TEMP_SCALE).round() as i32;
+    POLICY_TEMPERATURE.store(scaled, Relaxed);
 }
 
-pub fn policy_lr() -> f64 {
-    let unscaled = POLICY_LR.load(Relaxed);
-    unscaled as f64 / LR_SCALE
+pub fn policy_temperature() -> f64 {
+    POLICY_TEMPERATURE.load(Relaxed) as f64 / TEMP_SCALE
 }
 
-pub fn set_range_lr(k: f64) {
-    let unscaled = (k * LR_SCALE).round() as i32;
-    RANGE_LR.store(unscaled, Relaxed);
+pub fn set_range_temperature(k: f64) {
+    let scaled = (k * TEMP_SCALE).round() as i32;
+    RANGE_TEMPERATURE.store(scaled, Relaxed);
 }
 
-pub fn range_lr() -> f64 {
-    let unscaled = RANGE_LR.load(Relaxed);
-    unscaled as f64 / LR_SCALE
+pub fn range_temperature() -> f64 {
+    RANGE_TEMPERATURE.load(Relaxed) as f64 / TEMP_SCALE
 }
 
-fn update_probs<const N: usize, const RANGING: bool>(
-    probs: &mut [f64; N],
-    legal: &[bool; N],
-    choice: usize,
-    action_ev: f64,
-    baseline: f64,
-) {
-    let lr = if RANGING { range_lr() } else { policy_lr() };
-    const FLOOR: f64 = 1e-6;
+fn update_probs<const N: usize, const RANGING: bool>(probs: &mut [f64; N], legal: &[bool; N], child_evs: &[f64; N]) {
+    let temperature = if RANGING { range_temperature() } else { policy_temperature() };
 
-    assert!(legal[choice]);
+    let max_ev = (0..N).filter(|&i| legal[i]).map(|i| child_evs[i]).fold(f64::NEG_INFINITY, f64::max);
 
-    let advantage = action_ev - baseline;
+    let mut total = 0.0;
 
     for i in 0..N {
-        if !legal[i] {
-            continue;
-        }
-
-        if i == choice {
-            probs[i] += lr * advantage * (1.0 - probs[i]);
+        if legal[i] {
+            probs[i] = ((child_evs[i] - max_ev) / temperature).exp();
+            total += probs[i];
         } else {
-            probs[i] -= lr * advantage * probs[i];
+            probs[i] = 0.0;
         }
-
-        probs[i] = probs[i].max(FLOOR);
     }
 
-    let total: f64 = (0..N).filter(|&i| legal[i]).map(|i| probs[i]).sum();
-
-    for i in 0..N {
-        probs[i] = if legal[i] { probs[i] / total } else { 0.0 };
+    for p in probs {
+        *p /= total;
     }
 }
 
@@ -539,8 +524,6 @@ const NUM_PLAYOUTS: usize = 1024;
 const HAND_COUNT: usize = Card::NUM * (Card::NUM - 1) / 2;
 const HAND_BATCH_SIZE: usize = HAND_COUNT;
 const NUM_RANGE_PASSES: usize = 4;
-
-const SHOW_DIAGNOSTICS: bool = false;
 
 pub fn inspect_range_summary(name: &str, state: &GameState, range: &Range) {
     const NUM_SHOWN: usize = 10;
@@ -691,10 +674,6 @@ impl GameState {
             );
 
             println!("INFO completed range pass {}/{}", pass_idx + 1, NUM_RANGE_PASSES,);
-
-            if SHOW_DIAGNOSTICS {
-                root.inspect_jam_ranges_after_pass(self, pass_idx + 1);
-            }
         }
 
         root
@@ -706,7 +685,7 @@ impl GameState {
         let mut root = self.build_ranged_tree();
         let mut rng = XorShiftU64::new();
 
-        for _ in 0..NUM_PLAYOUTS {
+        for _ in 0..NUM_PLAYOUTS * 10 {
             let runout = self.gen_runout();
 
             let hero_mask = CARD_MASKS[self.hero_hand.0] | CARD_MASKS[self.hero_hand.1];
@@ -997,27 +976,6 @@ impl Node {
         1 + children
     }
 
-    /// Useful for checking that ranging is working well - jamming ranges should typically be very
-    /// strong (or at least polar) and jam-calling range should be very strong.
-    fn inspect_jam_ranges_after_pass(&self, state: &GameState, pass_number: usize) {
-        let after_jam = match self.actions.as_ref().unwrap() {
-            Actions::Even(actions) => actions.children.as_ref().unwrap()[4].as_ref(),
-            Actions::Behind(actions) => actions.children.as_ref().unwrap()[3].as_ref(),
-        };
-
-        println!("\n\n################ RANGE PASS {pass_number} ################");
-
-        inspect_range_summary("SB jamming range", state, after_jam.sb_range.as_ref());
-
-        let Actions::Behind(response_actions) = after_jam.actions.as_ref().unwrap() else {
-            unreachable!("");
-        };
-
-        let after_call = response_actions.children.as_ref().unwrap()[1].as_ref();
-
-        inspect_range_summary("BB call-after-jam range", state, after_call.bb_range.as_ref());
-    }
-
     fn legal_actions<const N: usize>(&self, children: &[Box<Node>; N]) -> [bool; N] {
         let mut legal = [true; N];
 
@@ -1211,46 +1169,44 @@ impl Node {
         let mut new_value = match self.actions.as_mut().unwrap() {
             Actions::Even(actions) => {
                 let children = actions.children.as_mut().unwrap();
-                let chosen_value = children[choice].backup_playout_result(&choices[1..], root_position, sample);
 
-                let baseline_value = weighted_child_value(&actions.probs, &actions.legal, |i| {
+                children[choice].backup_playout_result(&choices[1..], root_position, sample);
+
+                let child_evs = std::array::from_fn(|i| {
                     let value = children[i].value;
-                    if value.initialized() { value } else { fallback }
+
+                    let value = if value.initialized() { value } else { fallback };
+
+                    value.for_player(node_position, root_position)
                 });
 
-                update_probs::<_, false>(
-                    &mut actions.probs,
-                    &actions.legal,
-                    choice,
-                    chosen_value.for_player(node_position, root_position),
-                    baseline_value.for_player(node_position, root_position),
-                );
+                update_probs::<_, false>(&mut actions.probs, &actions.legal, &child_evs);
 
                 weighted_child_value(&actions.probs, &actions.legal, |i| {
                     let value = children[i].value;
+
                     if value.initialized() { value } else { fallback }
                 })
             }
 
             Actions::Behind(actions) => {
                 let children = actions.children.as_mut().unwrap();
-                let chosen_value = children[choice].backup_playout_result(&choices[1..], root_position, sample);
 
-                let baseline_value = weighted_child_value(&actions.probs, &actions.legal, |i| {
+                children[choice].backup_playout_result(&choices[1..], root_position, sample);
+
+                let child_evs = std::array::from_fn(|i| {
                     let value = children[i].value;
-                    if value.initialized() { value } else { fallback }
+
+                    let value = if value.initialized() { value } else { fallback };
+
+                    value.for_player(node_position, root_position)
                 });
 
-                update_probs::<_, false>(
-                    &mut actions.probs,
-                    &actions.legal,
-                    choice,
-                    chosen_value.for_player(node_position, root_position),
-                    baseline_value.for_player(node_position, root_position),
-                );
+                update_probs::<_, false>(&mut actions.probs, &actions.legal, &child_evs);
 
                 weighted_child_value(&actions.probs, &actions.legal, |i| {
                     let value = children[i].value;
+
                     if value.initialized() { value } else { fallback }
                 })
             }
@@ -1406,7 +1362,7 @@ impl Node {
         state: &mut HandPolicyState,
         root_position: Position,
         sample: NodeValue,
-    ) -> NodeValue {
+    ) {
         let key = Self::policy_key(self);
 
         if choices.is_empty() {
@@ -1418,7 +1374,8 @@ impl Node {
 
             value.observe(sample.hero_ev, sample.villain_ev);
             state.stats.insert(key, NodePolicyStats::Terminal { value });
-            return value;
+
+            return;
         }
 
         let choice = choices[0];
@@ -1429,62 +1386,49 @@ impl Node {
             Actions::Behind(actions) => actions.children.as_ref().unwrap()[choice].as_ref(),
         };
 
-        let chosen_value =
-            chosen_child.backup_playout_result_to_hand_state(&choices[1..], state, root_position, sample);
+        chosen_child.backup_playout_result_to_hand_state(&choices[1..], state, root_position, sample);
 
         let existing = state.stats.get(&key).copied().unwrap_or_else(|| match self.actions.as_ref().unwrap() {
             Actions::Even(actions) => NodePolicyStats::Even { probs: actions.probs, value: NodeValue::default() },
+
             Actions::Behind(actions) => NodePolicyStats::Behind { probs: actions.probs, value: NodeValue::default() },
         });
 
         let previous_value = existing.value();
+
         let fallback = if previous_value.initialized() { previous_value } else { sample };
 
         match (self.actions.as_ref().unwrap(), existing) {
             (Actions::Even(actions), NodePolicyStats::Even { mut probs, value: _ }) => {
                 let children = actions.children.as_ref().unwrap();
-                let baseline_value = weighted_child_value(&probs, &actions.legal, |i| {
-                    state.value(children[i].as_ref()).unwrap_or(fallback)
-                });
 
-                update_probs::<_, true>(
-                    &mut probs,
-                    &actions.legal,
-                    choice,
-                    chosen_value.for_player(node_position, root_position),
-                    baseline_value.for_player(node_position, root_position),
-                );
+                let child_values = std::array::from_fn(|i| state.value(children[i].as_ref()).unwrap_or(fallback));
 
-                let mut value = weighted_child_value(&probs, &actions.legal, |i| {
-                    state.value(children[i].as_ref()).unwrap_or(fallback)
-                });
+                let child_evs = child_values.map(|value| value.for_player(node_position, root_position));
+
+                update_probs::<_, true>(&mut probs, &actions.legal, &child_evs);
+
+                let mut value = weighted_child_value(&probs, &actions.legal, |i| child_values[i]);
+
                 value.visits = previous_value.visits + 1;
 
                 state.stats.insert(key, NodePolicyStats::Even { probs, value });
-                value
             }
 
             (Actions::Behind(actions), NodePolicyStats::Behind { mut probs, value: _ }) => {
                 let children = actions.children.as_ref().unwrap();
-                let baseline_value = weighted_child_value(&probs, &actions.legal, |i| {
-                    state.value(children[i].as_ref()).unwrap_or(fallback)
-                });
 
-                update_probs::<_, true>(
-                    &mut probs,
-                    &actions.legal,
-                    choice,
-                    chosen_value.for_player(node_position, root_position),
-                    baseline_value.for_player(node_position, root_position),
-                );
+                let child_values = std::array::from_fn(|i| state.value(children[i].as_ref()).unwrap_or(fallback));
 
-                let mut value = weighted_child_value(&probs, &actions.legal, |i| {
-                    state.value(children[i].as_ref()).unwrap_or(fallback)
-                });
+                let child_evs = child_values.map(|value| value.for_player(node_position, root_position));
+
+                update_probs::<_, true>(&mut probs, &actions.legal, &child_evs);
+
+                let mut value = weighted_child_value(&probs, &actions.legal, |i| child_values[i]);
+
                 value.visits = previous_value.visits + 1;
 
                 state.stats.insert(key, NodePolicyStats::Behind { probs, value });
-                value
             }
 
             _ => unreachable!(),

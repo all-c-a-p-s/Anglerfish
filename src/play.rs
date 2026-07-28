@@ -1,6 +1,6 @@
 use crate::game::{CARD_MASKS, Card, CardSet, ChipState, GameState, Hand, Outcome, Position, Rank, Suit};
 use crate::rng::XorShiftU64;
-use crate::search::{Actions, Node, Range, inspect_range_summary};
+use crate::search::{Actions, Node, Range, inspect_range_summary, set_range_temperature};
 
 use std::io;
 use std::time::Instant;
@@ -119,7 +119,11 @@ pub fn play_from(gs: &mut GameState) -> AppliedAction {
     );
 
     let start = Instant::now();
+
+    set_range_temperature(2.0);
     let range_root = gs.build_ranged_tree();
+    set_range_temperature(1.0);
+
     println!("INFO range analysis took: {:?}", start.elapsed(),);
 
     apply_action(gs, &range_root, choice)
@@ -177,7 +181,9 @@ fn receive_opponent_action(gs: &mut GameState) -> AppliedAction {
 
     println!("{gs}");
 
+    set_range_temperature(2.0);
     let root = gs.build_ranged_tree();
+    set_range_temperature(1.0);
 
     println!("INFO range analysis took: {:?}", start.elapsed(),);
     println!("INFO waiting to receive opponent action");
@@ -312,7 +318,7 @@ impl Parseable for ChipState {
     }
 }
 
-const INSPECT_RANGES: bool = false;
+const INSPECT_RANGES: bool = true;
 
 pub fn hand_loop() {
     println!("INFO waiting to receive chip state after blinds (sb [stack] [bet] bb [stack] [bet])");

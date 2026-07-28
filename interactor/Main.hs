@@ -8,7 +8,7 @@ import Runner
 
 main :: IO ()
 main = do
-  seriesResult <- runSeries 10
+  seriesResult <- runSeries 100
 
   putStrLn ""
   putStrLn ""

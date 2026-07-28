@@ -1,10 +1,13 @@
 EXE := Anglerfish
+TEST_EXE := AnglerfishTest
 
 ifeq ($(OS),Windows_NT)
 	NAME := $(EXE).exe
+	TEST_NAME := $(TEST_EXE).exe
 	RUN := $(NAME)
 else
 	NAME := $(EXE)
+	TEST_NAME := $(TEST_EXE)
 	RUN := ./$(NAME)
 endif
 
@@ -14,6 +17,9 @@ all: build
 
 build:
 	cargo rustc --release -- -C target-cpu=native --emit link=$(NAME)
+
+test:
+	cargo rustc --release -- -C target-cpu=native --emit link=$(TEST_NAME)
 
 run: build
 	$(RUN)

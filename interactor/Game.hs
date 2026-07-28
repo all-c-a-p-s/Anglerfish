@@ -125,7 +125,7 @@ bigBlind :: Int
 bigBlind = 2
 
 startingStack :: Int
-startingStack = 200
+startingStack = 100
 
 data Position = SmallBlind | BigBlind deriving (Show, Eq)
 

@@ -12,7 +12,6 @@ fn equivalence_key(board: &CardSet, hand: Hand) -> u64 {
     let suit_masks = board.suit_masks;
 
     let mut a = (hand.0.rank as u8, suit_masks[hand.0.suit]);
-
     let mut b = (hand.1.rank as u8, suit_masks[hand.1.suit]);
 
     if a > b {

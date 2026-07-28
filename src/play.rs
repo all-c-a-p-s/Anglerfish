@@ -1,6 +1,6 @@
 use crate::game::{CARD_MASKS, Card, CardSet, ChipState, GameState, Hand, Outcome, Position, Rank, Suit};
 use crate::rng::XorShiftU64;
-use crate::search::{Actions, Node, Range, inspect_range_summary, set_range_temp};
+use crate::search::{Actions, Node, Range, inspect_range_summary};
 
 use std::io;
 use std::time::Instant;
@@ -118,11 +118,9 @@ pub fn play_from(gs: &mut GameState) -> AppliedAction {
 
     // Since our opponent probably plays differently to us, we increase the temperature when
     // considering their range/their perception of our range.
-    set_range_temp(10.0);
     let start = Instant::now();
     let range_root = gs.build_ranged_tree();
     println!("INFO range analysis took: {:?}", start.elapsed(),);
-    set_range_temp(1.0);
 
     apply_action(gs, &range_root, choice)
 }
@@ -180,9 +178,7 @@ fn receive_opponent_action(gs: &mut GameState) -> AppliedAction {
     println!("{gs}");
 
     // As above.
-    set_range_temp(10.0);
     let root = gs.build_ranged_tree();
-    set_range_temp(1.0);
 
     println!("INFO range analysis took: {:?}", start.elapsed(),);
     println!("INFO waiting to receive opponent action");
@@ -317,7 +313,7 @@ impl Parseable for ChipState {
     }
 }
 
-const INSPECT_RANGES: bool = false;
+const INSPECT_RANGES: bool = true;
 
 pub fn hand_loop() {
     println!("INFO waiting to receive chip state after blinds (sb [stack] [bet] bb [stack] [bet])");
@@ -352,13 +348,13 @@ pub fn hand_loop() {
             break;
         }
 
-        if applied.street_advanced {
-            receive_next_street(&mut gs);
-        }
-
         if INSPECT_RANGES {
             inspect_range_summary("SB range", &gs, &gs.sb_range);
             inspect_range_summary("BB range", &gs, &gs.bb_range);
+        }
+
+        if applied.street_advanced {
+            receive_next_street(&mut gs);
         }
     }
 }

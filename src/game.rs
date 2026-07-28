@@ -276,6 +276,25 @@ impl ChipState {
             }
         }
     }
+
+    pub fn refund_uncalled(&mut self) {
+        let sb_bet = self.sb_this_street;
+        let bb_bet = self.bb_this_street;
+
+        if sb_bet > bb_bet {
+            let excess = sb_bet - bb_bet;
+
+            self.sb_stack += excess;
+            self.sb_this_street -= excess;
+            self.pot -= excess;
+        } else if bb_bet > sb_bet {
+            let excess = bb_bet - sb_bet;
+
+            self.bb_stack += excess;
+            self.bb_this_street -= excess;
+            self.pot -= excess;
+        }
+    }
 }
 
 /// Cardset != 5-card hand.

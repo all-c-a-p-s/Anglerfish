@@ -67,10 +67,10 @@ stopEngine engine = do
   hClose (engineOut engine)
 
 firstPath :: FilePath
-firstPath = "./../Anglerfish"
+firstPath = "./Anglerfish"
 
 secondPath :: FilePath
-secondPath = "./../Anglerfish"
+secondPath = "./AnglerfishTest"
 
 data Action
   = Fold

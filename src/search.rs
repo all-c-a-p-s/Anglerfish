@@ -5,7 +5,6 @@ use crate::hash::EquivalenceHash;
 use crate::rng::XorShiftU64;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// Big search file!!!
 /// Generally, there are two parts:
@@ -374,63 +373,54 @@ pub enum Actions {
     Behind(BehindActions),
 }
 
-const POLICY_TEMPERATURE: f64 = 5.0;
-const RANGE_TEMP_SCALE: f64 = 1_000.0;
-
-static RANGE_TEMPERATURE: AtomicU64 = AtomicU64::new(1_000); // 1.000
-
-pub fn set_range_temp(value: f64) {
-    RANGE_TEMPERATURE.store((value * RANGE_TEMP_SCALE).round() as u64, Relaxed);
-}
-
-fn range_temp() -> f64 {
-    RANGE_TEMPERATURE.load(Relaxed) as f64 / RANGE_TEMP_SCALE
-}
-
-fn softmax<const N: usize, const RANGE_CALC: bool>(values: &[f64; N], legal: &[bool; N]) -> [f64; N] {
-    let temperature = if RANGE_CALC { range_temp() } else { POLICY_TEMPERATURE };
-
-    let max_value = (0..N).filter(|&i| legal[i]).map(|i| values[i]).fold(f64::NEG_INFINITY, f64::max);
-
-    let mut probs = [0.0; N];
-    let mut total = 0.0;
-
-    for i in 0..N {
-        if legal[i] {
-            probs[i] = ((values[i] - max_value) / temperature).exp();
-            total += probs[i];
-        }
-    }
-
-    for p in &mut probs {
-        *p /= total;
-    }
-
-    probs
-}
-
-fn update_probs<const N: usize, const RANGE_CALC: bool>(
+fn update_probs<const N: usize>(
     probs: &mut [f64; N],
     total_ev: &mut [f64; N],
     visits: &mut [u32; N],
     legal: &[bool; N],
     choice: usize,
-    player_ev: f64,
+    action_ev: f64,
 ) {
+    const LR: f64 = 0.001;
+
     assert!(legal[choice]);
 
-    total_ev[choice] += player_ev;
+    // baseline := estimate of expected value of parent node
+    // based on mean ev of children and probabilities
+    let baseline: f64 = (0..N)
+        .filter(|&i| legal[i])
+        .map(|i| {
+            let avg = if visits[i] > 0 { total_ev[i] / visits[i] as f64 } else { 0.0 };
+            probs[i] * avg
+        })
+        .sum();
+
+    total_ev[choice] += action_ev;
     visits[choice] += 1;
 
-    let mut mean_ev = [0.0; N];
+    let advantage = action_ev - baseline;
 
+    // increase/decrease all probabilities based on performance of this action relative to baseline
     for i in 0..N {
-        if visits[i] > 0 {
-            mean_ev[i] = total_ev[i] / visits[i] as f64;
+        if !legal[i] {
+            continue;
+        }
+        if i == choice {
+            probs[i] += LR * advantage * (1.0 - probs[i]);
+        } else {
+            probs[i] -= LR * advantage * probs[i];
         }
     }
 
-    *probs = softmax::<N, RANGE_CALC>(&mean_ev, legal);
+    let floor = 1e-6;
+    for p in probs.iter_mut() {
+        *p = p.max(floor);
+    }
+
+    let total: f64 = (0..N).filter(|&i| legal[i]).map(|i| probs[i]).sum();
+    for i in 0..N {
+        probs[i] = if legal[i] { probs[i] / total } else { 0.0 };
+    }
 }
 
 pub enum HandPolicies {
@@ -792,7 +782,7 @@ impl GameState {
         }
     }
 
-    fn hand_policies(&self) -> HandPolicies {
+    pub fn hand_policies(&self) -> HandPolicies {
         let node_type = if self.chip_state.sb_this_street == self.chip_state.bb_this_street {
             NodeType::EvenNode
         } else {
@@ -952,7 +942,7 @@ impl Node {
         inspect_range_summary("SB jamming range", state, after_jam.sb_range.as_ref());
 
         let Actions::Behind(response_actions) = after_jam.actions.as_ref().unwrap() else {
-            unreachable!("Opponent should be facing the jam");
+            unreachable!("");
         };
 
         let after_call = response_actions.children.as_ref().unwrap()[1].as_ref();
@@ -960,8 +950,16 @@ impl Node {
         inspect_range_summary("BB call-after-jam range", state, after_call.bb_range.as_ref());
     }
 
-    fn distinct_actions<const N: usize>(children: &[Box<Node>; N]) -> [bool; N] {
+    fn legal_actions<const N: usize>(&self, children: &[Box<Node>; N]) -> [bool; N] {
         let mut legal = [true; N];
+
+        let (us, them) = if self.position == Position::SmallBlind {
+            (self.chip_state.sb_stack, self.chip_state.bb_stack)
+        } else {
+            (self.chip_state.bb_stack, self.chip_state.sb_stack)
+        };
+
+        let behind = N == 4;
 
         for i in 1..N {
             for j in 0..i {
@@ -969,6 +967,16 @@ impl Node {
                     legal[i] = false;
                     break;
                 }
+            }
+
+            // can't fold after going all in
+            if behind && i == 0 && us == 0 {
+                legal[i] = false;
+            }
+
+            // can't raise when opponent is all in
+            if behind && them == 0 && i >= 2 {
+                legal[i] = false;
             }
         }
 
@@ -1062,15 +1070,7 @@ impl Node {
         self.apply_playout_result(choices, result, outcome, hero_equity, range_equity);
     }
 
-    /// Propagates result of playout to update probabilities.
-    fn apply_playout_result(
-        &mut self,
-        choices: Vec<usize>,
-        result: ChipState,
-        outcome: Outcome,
-        hero_equity: f64,
-        range_equity: f64,
-    ) {
+    fn calc_evs(&self, result: ChipState, outcome: Outcome, hero_equity: f64, range_equity: f64) -> (f64, f64) {
         let root_position = self.position;
 
         let starting_stack = match root_position {
@@ -1109,6 +1109,21 @@ impl Node {
 
         let villain_pov_ev = villain_final_stack - villain_starting_stack;
 
+        (hero_pov_ev, villain_pov_ev)
+    }
+
+    /// Propagates result of playout to update probabilities.
+    fn apply_playout_result(
+        &mut self,
+        choices: Vec<usize>,
+        result: ChipState,
+        outcome: Outcome,
+        hero_equity: f64,
+        range_equity: f64,
+    ) {
+        let (hero_pov_ev, villain_pov_ev) = self.calc_evs(result, outcome, hero_equity, range_equity);
+        let root_position = self.position;
+
         let mut node = self;
 
         for choice in choices {
@@ -1116,7 +1131,7 @@ impl Node {
 
             let next_node = match node.actions.as_mut().unwrap() {
                 Actions::Even(actions) => {
-                    update_probs::<_, false>(
+                    update_probs::<_>(
                         &mut actions.probs,
                         &mut actions.total_ev,
                         &mut actions.visits,
@@ -1128,7 +1143,7 @@ impl Node {
                 }
 
                 Actions::Behind(actions) => {
-                    update_probs::<_, false>(
+                    update_probs::<_>(
                         &mut actions.probs,
                         &mut actions.total_ev,
                         &mut actions.visits,
@@ -1278,41 +1293,7 @@ impl Node {
     ) {
         let root_position = self.position;
 
-        let starting_stack = match root_position {
-            Position::SmallBlind => self.chip_state.sb_stack as f64,
-            Position::BigBlind => self.chip_state.bb_stack as f64,
-        };
-
-        let final_stack_hero_pov = match (root_position, outcome) {
-            (Position::SmallBlind, Outcome::Showdown) => result.sb_stack as f64 + result.pot as f64 * hero_equity,
-            (Position::BigBlind, Outcome::Showdown) => result.bb_stack as f64 + result.pot as f64 * hero_equity,
-            (Position::SmallBlind, Outcome::BBFolded) => result.sb_stack as f64 + result.pot as f64,
-            (Position::BigBlind, Outcome::BBFolded) => result.bb_stack as f64,
-            (Position::SmallBlind, Outcome::SBFolded) => result.sb_stack as f64,
-            (Position::BigBlind, Outcome::SBFolded) => result.bb_stack as f64 + result.pot as f64,
-        };
-
-        let hero_pov_ev = final_stack_hero_pov - starting_stack;
-
-        let villain_starting_stack = match root_position {
-            Position::SmallBlind => self.chip_state.bb_stack as f64,
-            Position::BigBlind => self.chip_state.sb_stack as f64,
-        };
-
-        let villain_final_stack = match (root_position, outcome) {
-            (Position::SmallBlind, Outcome::Showdown) => {
-                result.bb_stack as f64 + result.pot as f64 * (1.0 - range_equity)
-            }
-            (Position::BigBlind, Outcome::Showdown) => {
-                result.sb_stack as f64 + result.pot as f64 * (1.0 - range_equity)
-            }
-            (Position::SmallBlind, Outcome::BBFolded) => result.bb_stack as f64,
-            (Position::SmallBlind, Outcome::SBFolded) => result.bb_stack as f64 + result.pot as f64,
-            (Position::BigBlind, Outcome::BBFolded) => result.sb_stack as f64 + result.pot as f64,
-            (Position::BigBlind, Outcome::SBFolded) => result.sb_stack as f64,
-        };
-
-        let villain_pov_ev = villain_final_stack - villain_starting_stack;
+        let (hero_pov_ev, villain_pov_ev) = self.calc_evs(result, outcome, hero_equity, range_equity);
         let mut node = self;
 
         for &choice in choices {
@@ -1322,31 +1303,31 @@ impl Node {
             match node.actions.as_ref().unwrap() {
                 Actions::Even(actions) => {
                     let stats = state.stats.entry(key).or_insert_with(|| NodePolicyStats::Even {
-                        probs: actions.probs,
-                        total_ev: actions.total_ev,
-                        visits: actions.visits,
+                        probs: [0.2; 5],
+                        total_ev: [0.0; 5],
+                        visits: [0; 5],
                     });
 
                     let NodePolicyStats::Even { probs, total_ev, visits } = stats else {
                         unreachable!();
                     };
 
-                    update_probs::<_, true>(probs, total_ev, visits, &actions.legal, choice, player_ev);
+                    update_probs::<_>(probs, total_ev, visits, &actions.legal, choice, player_ev);
                     node = actions.children.as_ref().unwrap()[choice].as_ref();
                 }
 
                 Actions::Behind(actions) => {
                     let stats = state.stats.entry(key).or_insert_with(|| NodePolicyStats::Behind {
-                        probs: actions.probs,
-                        total_ev: actions.total_ev,
-                        visits: actions.visits,
+                        probs: [0.25; 4],
+                        total_ev: [0.0; 4],
+                        visits: [0; 4],
                     });
 
                     let NodePolicyStats::Behind { probs, total_ev, visits } = stats else {
                         unreachable!();
                     };
 
-                    update_probs::<_, true>(probs, total_ev, visits, &actions.legal, choice, player_ev);
+                    update_probs::<_>(probs, total_ev, visits, &actions.legal, choice, player_ev);
                     node = actions.children.as_ref().unwrap()[choice].as_ref();
                 }
             }
@@ -1425,6 +1406,8 @@ impl Node {
 
     fn close_betting_round(&self, mut chip_state: ChipState) -> Self {
         if chip_state.sb_stack == 0 || chip_state.bb_stack == 0 || self.streets_remaining == 1 {
+            chip_state.refund_uncalled();
+
             Node::from(
                 chip_state,
                 self.position.next(),
@@ -1667,7 +1650,7 @@ impl Node {
                 let mut children: [Box<Node>; 4] =
                     (0..4).map(|i| Box::new(self.successor(i).unwrap())).collect::<Vec<_>>().try_into().unwrap();
 
-                let legal = Self::distinct_actions(&children);
+                let legal = self.legal_actions(&children);
 
                 for i in 0..4 {
                     if legal[i] {
@@ -1677,7 +1660,7 @@ impl Node {
 
                 let mut actions = BehindActions::BLANK;
                 actions.legal = legal;
-                actions.probs = softmax::<_, false>(&actions.total_ev, &actions.legal);
+                actions.probs = [0.25; 4];
                 actions.children = Some(children);
 
                 self.actions = Some(Actions::Behind(actions));
@@ -1687,7 +1670,7 @@ impl Node {
                 let mut children: [Box<Node>; 5] =
                     (0..5).map(|i| Box::new(self.successor(i).unwrap())).collect::<Vec<_>>().try_into().unwrap();
 
-                let legal = Self::distinct_actions(&children);
+                let legal = self.legal_actions(&children);
 
                 for i in 0..5 {
                     if legal[i] {
@@ -1697,7 +1680,7 @@ impl Node {
 
                 let mut actions = EvenActions::BLANK;
                 actions.legal = legal;
-                actions.probs = softmax::<_, false>(&actions.total_ev, &actions.legal);
+                actions.probs = [0.2; 5];
                 actions.children = Some(children);
 
                 self.actions = Some(Actions::Even(actions));

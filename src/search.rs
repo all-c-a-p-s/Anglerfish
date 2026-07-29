@@ -323,17 +323,24 @@ impl Range {
     }
 }
 
-fn blend_ranges(prev: &Range, new: &Range, beta: f64) -> Range {
+/// Since range passes don't update incrementally (one pass just creates a completely new range,
+/// based on the results from the previous pass), there's a concern that these ranges oscillate
+/// rather than converging:
+/// e.g. tight -> bluffy -> tight -> bluffy etc
+/// to try and avoid this we blend between results of range passes.
+fn blend_ranges(prev: &Range, new: &Range, pass: usize) -> Range {
     let mut probs = [[0.0; Card::NUM]; Card::NUM];
+
+    let pass = pass as f64;
 
     for c1 in CARDS {
         for c2 in CARDS {
             if c1 <= c2 {
                 continue;
             }
-            let p = (1.0 - beta) * prev.probs[c1][c2] + beta * new.probs[c1][c2];
-            probs[c1][c2] = p;
-            probs[c2][c1] = p;
+
+            probs[c1][c2] = (prev.probs[c1][c2] * pass + new.probs[c1][c2]) / (pass + 1.0);
+            probs[c2][c1] = probs[c2][c1];
         }
     }
 
@@ -435,8 +442,8 @@ fn weighted_child_value<const N: usize>(
     value
 }
 
-static POLICY_TEMPERATURE: AtomicI32 = AtomicI32::new(9_000);
-static RANGE_TEMPERATURE: AtomicI32 = AtomicI32::new(9_000);
+static POLICY_TEMPERATURE: AtomicI32 = AtomicI32::new(2_500);
+static RANGE_TEMPERATURE: AtomicI32 = AtomicI32::new(2_500);
 
 const TEMP_SCALE: f64 = 1_000.0;
 
@@ -702,6 +709,7 @@ impl GameState {
                 self.board_len,
                 RANGE_UPDATE_DEPTH,
                 &cached_runouts,
+                pass_idx,
             );
 
             println!("INFO completed range pass {}/{}", pass_idx + 1, passes);
@@ -1262,6 +1270,7 @@ impl Node {
         board_len: u8,
         depth: usize,
         cached_runouts: &[CachedRunout],
+        pass: usize,
     ) {
         if self.terminal || depth == 0 {
             return;
@@ -1280,8 +1289,6 @@ impl Node {
 
         let policies = state.hand_policies_from_root(self, cached_runouts);
 
-        const RANGE_DAMPING_BETA: f64 = 0.4;
-
         match self.actions.as_mut().unwrap() {
             Actions::Even(actions) => {
                 let children = actions.children.as_mut().unwrap();
@@ -1296,13 +1303,13 @@ impl Node {
 
                     let child = children[decision_idx].as_mut();
 
-                    let blended_sb = blend_ranges(child.sb_range.as_ref(), &child_state.sb_range, RANGE_DAMPING_BETA);
-                    let blended_bb = blend_ranges(child.bb_range.as_ref(), &child_state.bb_range, RANGE_DAMPING_BETA);
+                    let blended_sb = blend_ranges(child.sb_range.as_ref(), &child_state.sb_range, pass);
+                    let blended_bb = blend_ranges(child.bb_range.as_ref(), &child_state.bb_range, pass);
 
                     child.sb_range = Rc::new(blended_sb);
                     child.bb_range = Rc::new(blended_bb);
 
-                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1, cached_runouts);
+                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1, cached_runouts, pass);
                 }
             }
 
@@ -1319,13 +1326,13 @@ impl Node {
 
                     let child = children[decision_idx].as_mut();
 
-                    let blended_sb = blend_ranges(child.sb_range.as_ref(), &child_state.sb_range, RANGE_DAMPING_BETA);
-                    let blended_bb = blend_ranges(child.bb_range.as_ref(), &child_state.bb_range, RANGE_DAMPING_BETA);
+                    let blended_sb = blend_ranges(child.sb_range.as_ref(), &child_state.sb_range, pass);
+                    let blended_bb = blend_ranges(child.bb_range.as_ref(), &child_state.bb_range, pass);
 
                     child.sb_range = Rc::new(blended_sb);
                     child.bb_range = Rc::new(blended_bb);
 
-                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1, cached_runouts);
+                    child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1, cached_runouts, pass);
                 }
             }
         }

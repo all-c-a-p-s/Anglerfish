@@ -23,4 +23,6 @@ samply-recording.json
 *.o
 *.hie
 
+*.gz
+
 todos.md

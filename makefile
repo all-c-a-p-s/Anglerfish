@@ -18,7 +18,7 @@ all: build
 build:
 	cargo rustc --release -- -C target-cpu=native --emit link=$(NAME)
 
-test:
+for_test:
 	cargo rustc --release -- -C target-cpu=native --emit link=$(TEST_NAME)
 
 run: build

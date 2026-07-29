@@ -340,7 +340,7 @@ fn blend_ranges(prev: &Range, new: &Range, pass: usize) -> Range {
             }
 
             probs[c1][c2] = (prev.probs[c1][c2] * pass + new.probs[c1][c2]) / (pass + 1.0);
-            probs[c2][c1] = probs[c2][c1];
+            probs[c2][c1] = probs[c1][c2];
         }
     }
 

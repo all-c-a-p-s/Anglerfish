@@ -442,27 +442,17 @@ fn weighted_child_value<const N: usize>(
     value
 }
 
-static POLICY_TEMPERATURE: AtomicI32 = AtomicI32::new(2_500);
-static RANGE_TEMPERATURE: AtomicI32 = AtomicI32::new(2_500);
+static TEMPERATURE: AtomicI32 = AtomicI32::new(2_500);
 
 const TEMP_SCALE: f64 = 1_000.0;
 
-pub fn set_policy_temperature(k: f64) {
+pub fn set_temperature(k: f64) {
     let scaled = (k * TEMP_SCALE).round() as i32;
-    POLICY_TEMPERATURE.store(scaled, Relaxed);
+    TEMPERATURE.store(scaled, Relaxed);
 }
 
-pub fn policy_temperature() -> f64 {
-    POLICY_TEMPERATURE.load(Relaxed) as f64 / TEMP_SCALE
-}
-
-pub fn set_range_temperature(k: f64) {
-    let scaled = (k * TEMP_SCALE).round() as i32;
-    RANGE_TEMPERATURE.store(scaled, Relaxed);
-}
-
-pub fn range_temperature() -> f64 {
-    RANGE_TEMPERATURE.load(Relaxed) as f64 / TEMP_SCALE
+pub fn temperature() -> f64 {
+    TEMPERATURE.load(Relaxed) as f64 / TEMP_SCALE
 }
 
 fn confidence_scale(visits: u32) -> f64 {
@@ -470,14 +460,8 @@ fn confidence_scale(visits: u32) -> f64 {
     1.0 + K / (1.0 + visits as f64).sqrt()
 }
 
-fn update_probs<const N: usize, const RANGING: bool>(
-    probs: &mut [f64; N],
-    legal: &[bool; N],
-    child_evs: &[f64; N],
-    visits: u32,
-) {
-    let base_temp = if RANGING { range_temperature() } else { policy_temperature() };
-
+fn update_probs<const N: usize>(probs: &mut [f64; N], legal: &[bool; N], child_evs: &[f64; N], visits: u32) {
+    let base_temp = temperature();
     let effective_temp = base_temp * confidence_scale(visits);
 
     let max_ev = (0..N).filter(|&i| legal[i]).map(|i| child_evs[i]).fold(f64::NEG_INFINITY, f64::max);
@@ -1222,7 +1206,7 @@ impl Node {
                     value.for_player(node_position, root_position)
                 });
 
-                update_probs::<_, false>(&mut actions.probs, &actions.legal, &child_evs, previous_value.visits);
+                update_probs::<_>(&mut actions.probs, &actions.legal, &child_evs, previous_value.visits);
 
                 weighted_child_value(&actions.probs, &actions.legal, |i| {
                     let value = children[i].value;
@@ -1244,7 +1228,7 @@ impl Node {
                     value.for_player(node_position, root_position)
                 });
 
-                update_probs::<_, false>(&mut actions.probs, &actions.legal, &child_evs, previous_value.visits);
+                update_probs::<_>(&mut actions.probs, &actions.legal, &child_evs, previous_value.visits);
 
                 weighted_child_value(&actions.probs, &actions.legal, |i| {
                     let value = children[i].value;
@@ -1452,33 +1436,27 @@ impl Node {
         match (self.actions.as_ref().unwrap(), existing) {
             (Actions::Even(actions), NodePolicyStats::Even { mut probs, value: _ }) => {
                 let children = actions.children.as_ref().unwrap();
-
                 let child_values = std::array::from_fn(|i| state.value(children[i].as_ref()).unwrap_or(fallback));
-
                 let child_evs = child_values.map(|value| value.for_player(node_position, root_position));
 
-                update_probs::<_, true>(&mut probs, &actions.legal, &child_evs, previous_value.visits);
+                update_probs::<_>(&mut probs, &actions.legal, &child_evs, previous_value.visits);
 
                 let mut value = weighted_child_value(&probs, &actions.legal, |i| child_values[i]);
 
                 value.visits = previous_value.visits + 1;
-
                 state.stats.insert(key, NodePolicyStats::Even { probs, value });
             }
 
             (Actions::Behind(actions), NodePolicyStats::Behind { mut probs, value: _ }) => {
                 let children = actions.children.as_ref().unwrap();
-
                 let child_values = std::array::from_fn(|i| state.value(children[i].as_ref()).unwrap_or(fallback));
-
                 let child_evs = child_values.map(|value| value.for_player(node_position, root_position));
 
-                update_probs::<_, true>(&mut probs, &actions.legal, &child_evs, previous_value.visits);
+                update_probs::<_>(&mut probs, &actions.legal, &child_evs, previous_value.visits);
 
                 let mut value = weighted_child_value(&probs, &actions.legal, |i| child_values[i]);
 
                 value.visits = previous_value.visits + 1;
-
                 state.stats.insert(key, NodePolicyStats::Behind { probs, value });
             }
 

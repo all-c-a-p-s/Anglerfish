@@ -311,7 +311,7 @@ impl Parseable for ChipState {
     }
 }
 
-const INSPECT_RANGES: bool = false;
+const INSPECT_RANGES: bool = true;
 
 pub fn hand_loop() {
     println!("INFO waiting to receive chip state after blinds (sb [stack] [bet] bb [stack] [bet])");

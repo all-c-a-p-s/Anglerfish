@@ -323,6 +323,23 @@ impl Range {
     }
 }
 
+fn blend_ranges(prev: &Range, new: &Range, beta: f64) -> Range {
+    let mut probs = [[0.0; Card::NUM]; Card::NUM];
+
+    for c1 in CARDS {
+        for c2 in CARDS {
+            if c1 <= c2 {
+                continue;
+            }
+            let p = (1.0 - beta) * prev.probs[c1][c2] + beta * new.probs[c1][c2];
+            probs[c1][c2] = p;
+            probs[c2][c1] = p;
+        }
+    }
+
+    Range { probs }
+}
+
 /// (1) Even betting actions:
 /// - check
 /// - bet 1/4 pot
@@ -1263,6 +1280,8 @@ impl Node {
 
         let policies = state.hand_policies_from_root(self, cached_runouts);
 
+        const RANGE_DAMPING_BETA: f64 = 0.4;
+
         match self.actions.as_mut().unwrap() {
             Actions::Even(actions) => {
                 let children = actions.children.as_mut().unwrap();
@@ -1276,8 +1295,12 @@ impl Node {
                     child_state.update_ranges_with_policies(decision_idx, &policies);
 
                     let child = children[decision_idx].as_mut();
-                    child.sb_range = Rc::new(child_state.sb_range);
-                    child.bb_range = Rc::new(child_state.bb_range);
+
+                    let blended_sb = blend_ranges(child.sb_range.as_ref(), &child_state.sb_range, RANGE_DAMPING_BETA);
+                    let blended_bb = blend_ranges(child.bb_range.as_ref(), &child_state.bb_range, RANGE_DAMPING_BETA);
+
+                    child.sb_range = Rc::new(blended_sb);
+                    child.bb_range = Rc::new(blended_bb);
 
                     child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1, cached_runouts);
                 }
@@ -1295,8 +1318,12 @@ impl Node {
                     child_state.update_ranges_with_policies(decision_idx, &policies);
 
                     let child = children[decision_idx].as_mut();
-                    child.sb_range = Rc::new(child_state.sb_range);
-                    child.bb_range = Rc::new(child_state.bb_range);
+
+                    let blended_sb = blend_ranges(child.sb_range.as_ref(), &child_state.sb_range, RANGE_DAMPING_BETA);
+                    let blended_bb = blend_ranges(child.bb_range.as_ref(), &child_state.bb_range, RANGE_DAMPING_BETA);
+
+                    child.sb_range = Rc::new(blended_sb);
+                    child.bb_range = Rc::new(blended_bb);
 
                     child.update_subtree_ranges(board, seen, hero_hand, board_len, depth - 1, cached_runouts);
                 }

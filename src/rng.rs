@@ -10,10 +10,12 @@ const SEED: u128 = 0xF8D1C463A579BE02;
 impl XorShiftU64 {
     const EXPLORATION: f64 = 0.1;
 
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self { state: (UNIX_EPOCH.elapsed().unwrap().as_nanos() % SEED) as u64 }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
         let mut x = self.state;
         x ^= x << 13;
@@ -34,7 +36,7 @@ impl XorShiftU64 {
 
         for i in (1..Card::NUM).rev() {
             let j = self.gen_range(0, i as i64) as usize;
-            p.swap(i as usize, j);
+            p.swap(i, j);
         }
 
         p

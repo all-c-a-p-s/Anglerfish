@@ -7,39 +7,39 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
 
-/// Big search file!!!
-/// Generally, there are two parts:
-///
-/// (1) MCTS-ish search of game tree:
-/// There are several Monte-Carlo playouts. In each one:
-/// - each side chooses a random set of actions through the game tree before seeing any of the
-///   future cards.
-/// - we generate a runout of cards, and use ranges (see below) to adjudicate showdown
-/// - we update action probabilities based on the outcome
-/// The idea is that over several playouts, the actions probabilities will approach the optimal
-/// probabilities over the average runout.
-///
-/// This essentially gives us a function mapping a hand/board situation to a probability
-/// distribution of actions (call this F). Specifically
-///
-/// F: (hand, board, ranges) -> distribution
-///
-/// (2) Ranging:
-/// But how can we actually estimate which hands our opponent is likely to have in a given showdown
-/// situation, given the actions they performed? Bayes theorem to the rescue!
-///
-/// H_i := have hand i, A := these actions
-/// P(H_i | A) = P(H_i n A) / P(A)
-///
-/// Note that we can get P(A | H_i) from F, P(H_i) is the prior probability of having this hand
-/// do P(A) = SUM over all H_j[ P(A | H_j) * P(H_j) ]
-/// P(H_i n A) = P(A | H_i) * P(H_i)
-///
-/// so we can now update the probability of a player holding a hand based on their actions.
-///
-/// Since these ranges actually depend on each other (e.g. if your opponents range to call your bet
-/// is strong, your betting range needs to be strong/polar as well), we run several ranging passes.
-/// Each pass runs F on the range estimates from the previous pass.
+// Big search file!!!
+// Generally, there are two parts:
+//
+// (1) MCTS-ish search of game tree:
+// There are several Monte-Carlo playouts. In each one:
+// - each side chooses a random set of actions through the game tree before seeing any of the
+//   future cards.
+// - we generate a runout of cards, and use ranges (see below) to adjudicate showdown
+// - we update action probabilities based on the outcome
+// The idea is that over several playouts, the actions probabilities will approach the optimal
+// probabilities over the average runout.
+//
+// This essentially gives us a function mapping a hand/board situation to a probability
+// distribution of actions (call this F). Specifically
+//
+// F: (hand, board, ranges) -> distribution
+//
+// (2) Ranging:
+// But how can we actually estimate which hands our opponent is likely to have in a given showdown
+// situation, given the actions they performed? Bayes theorem to the rescue!
+//
+// H_i := have hand i, A := these actions
+// P(H_i | A) = P(H_i n A) / P(A)
+//
+// Note that we can get P(A | H_i) from F, P(H_i) is the prior probability of having this hand
+// do P(A) = SUM over all H_j[ P(A | H_j) * P(H_j) ]
+// P(H_i n A) = P(A | H_i) * P(H_i)
+//
+// so we can now update the probability of a player holding a hand based on their actions.
+//
+// Since these ranges actually depend on each other (e.g. if your opponents range to call your bet
+// is strong, your betting range needs to be strong/polar as well), we run several ranging passes.
+// Each pass runs F on the range estimates from the previous pass.
 
 /// One node in the future game tree
 #[derive(Debug, Clone)]
@@ -482,6 +482,7 @@ fn update_probs<const N: usize>(probs: &mut [f64; N], legal: &[bool; N], child_e
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum HandPolicies {
     Even([[[f64; 5]; Card::NUM]; Card::NUM]),
     Behind([[[f64; 4]; Card::NUM]; Card::NUM]),
@@ -557,7 +558,7 @@ pub fn inspect_range_summary(name: &str, state: &GameState, range: &Range) {
     let t9s = (Card::new(Rank::Ten, Suit::Spades), Card::new(Rank::Nine, Suit::Spades));
 
     let interesting_hands =
-        [("AA", aa), ("AKs", aks), ("AKo", ako), ("TT", tt), ("22", dd), ("72o", sdo), ("T9s", t9s)];
+        [("AsAh", aa), ("AsKs", aks), ("AsKh", ako), ("TsTh", tt), ("2s2h", dd), ("7s2h", sdo), ("Ts9s", t9s)];
 
     let mut combos = vec![];
     let mut entropy = 0.0;
@@ -780,6 +781,7 @@ impl GameState {
             for runout in cached_runouts {
                 let public_seen = runout.public_seen;
 
+                #[allow(clippy::type_complexity)]
                 let mut terminal_equities: HashMap<
                     (*const Range, *const Range),
                     (Box<[[f64; Card::NUM]; Card::NUM]>, f64),
@@ -799,12 +801,12 @@ impl GameState {
 
                         let key = (Rc::as_ptr(&terminal.sb_range), Rc::as_ptr(&terminal.bb_range));
 
-                        if !terminal_equities.contains_key(&key) {
+                        terminal_equities.entry(key).or_insert_with(|| {
                             let (equities, range_equity) =
                                 terminal.equity_table_for_runout(self.turn, public_seen, &runout.cache);
 
-                            terminal_equities.insert(key, (Box::new(equities), range_equity));
-                        }
+                            (Box::new(equities), range_equity)
+                        });
 
                         let (equities, range_equity) = terminal_equities.get(&key).unwrap();
 
@@ -1119,7 +1121,7 @@ impl Node {
             (0.0, 0.0)
         };
 
-        self.apply_playout_result(choices, result, outcome, hero_equity, range_equity);
+        self.apply_playout_result(&choices, result, outcome, hero_equity, range_equity);
     }
 
     fn calc_evs(&self, result: ChipState, outcome: Outcome, hero_equity: f64, range_equity: f64) -> (f64, f64) {
@@ -1167,7 +1169,7 @@ impl Node {
     /// Propagates a playout result from the terminal node back to the root.
     fn apply_playout_result(
         &mut self,
-        choices: Vec<usize>,
+        choices: &[usize],
         result: ChipState,
         outcome: Outcome,
         hero_equity: f64,
@@ -1246,6 +1248,7 @@ impl Node {
     /// Recursively updates ranges. Basically stuff like:
     /// - if I jam now, what will they think my jamming range is?
     /// - given that, what range will they call me with?
+    #[allow(clippy::too_many_arguments)]
     fn update_subtree_ranges(
         &mut self,
         board: CardSet,
@@ -1277,15 +1280,13 @@ impl Node {
             Actions::Even(actions) => {
                 let children = actions.children.as_mut().unwrap();
 
-                for decision_idx in 0..5 {
+                for (decision_idx, child) in children.iter_mut().enumerate() {
                     if !actions.legal[decision_idx] {
                         continue;
                     }
 
                     let mut child_state = state;
                     child_state.update_ranges_with_policies(decision_idx, &policies);
-
-                    let child = children[decision_idx].as_mut();
 
                     let blended_sb = blend_ranges(child.sb_range.as_ref(), &child_state.sb_range, pass);
                     let blended_bb = blend_ranges(child.bb_range.as_ref(), &child_state.bb_range, pass);
@@ -1300,15 +1301,13 @@ impl Node {
             Actions::Behind(actions) => {
                 let children = actions.children.as_mut().unwrap();
 
-                for decision_idx in 0..4 {
+                for (decision_idx, child) in children.iter_mut().enumerate() {
                     if !actions.legal[decision_idx] {
                         continue;
                     }
 
                     let mut child_state = state;
                     child_state.update_ranges_with_policies(decision_idx, &policies);
-
-                    let child = children[decision_idx].as_mut();
 
                     let blended_sb = blend_ranges(child.sb_range.as_ref(), &child_state.sb_range, pass);
                     let blended_bb = blend_ranges(child.bb_range.as_ref(), &child_state.bb_range, pass);
@@ -1501,6 +1500,7 @@ impl Node {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from(
         chip_state: ChipState,
         position: Position,
@@ -1651,7 +1651,7 @@ impl Node {
                 self.actions_this_street + 1,
             );
 
-            return Some(r);
+            Some(r)
         } else {
             let amount_behind = match self.position {
                 Position::SmallBlind => self.chip_state.bb_this_street - self.chip_state.sb_this_street,
@@ -1677,7 +1677,7 @@ impl Node {
                         self.actions_this_street,
                     );
 
-                    return Some(r);
+                    Some(r)
                 }
 
                 1 => {
@@ -1693,7 +1693,7 @@ impl Node {
 
                     let r = self.call_successor(ns);
 
-                    return Some(r);
+                    Some(r)
                 }
 
                 2 => {
@@ -1734,7 +1734,7 @@ impl Node {
                         )
                     };
 
-                    return Some(r);
+                    Some(r)
                 }
                 3 => {
                     let amount = our_stack;
@@ -1763,7 +1763,7 @@ impl Node {
                         )
                     };
 
-                    return Some(r);
+                    Some(r)
                 }
 
                 _ => unreachable!(),

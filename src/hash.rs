@@ -6,6 +6,7 @@ use std::collections::HashMap;
 /// - have the same suitedness property
 /// - have the same two ranks
 /// - have the same board-rank mask for each hole-card suit
+///
 /// Preflop, a lot of hands will be equivalent (only 169 possible keys),
 /// but postflop most hands will be distinct.
 fn equivalence_key(board: &CardSet, hand: Hand) -> u64 {

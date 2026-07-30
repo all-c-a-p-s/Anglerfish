@@ -211,8 +211,8 @@ impl fmt::Display for CardSet {
 
 impl fmt::Display for ChipState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pot: {}\n", self.pot)?;
-        write!(f, "bb stack: {}\n", self.bb_stack)?;
+        writeln!(f, "pot: {}", self.pot)?;
+        writeln!(f, "bb stack: {}", self.bb_stack)?;
         write!(f, "sb stack: {}", self.sb_stack)?;
 
         Ok(())
@@ -224,7 +224,7 @@ impl fmt::Display for GameState {
         write!(f, "{}", "=".repeat(20))?;
         write!(f, "\nBOARD:\n{}\n\n", self.board)?;
         write!(f, "CHIPSTATE:\n{}\n\n", self.chip_state)?;
-        write!(f, "HERO HAND: {}{}\n", self.hero_hand.0, self.hero_hand.1)?;
+        writeln!(f, "HERO HAND: {}{}", self.hero_hand.0, self.hero_hand.1)?;
         write!(f, "{}", "=".repeat(20))?;
 
         Ok(())
@@ -313,10 +313,10 @@ const WHEEL_MASK: u16 = 0b0001_0000_0000_1111;
 
 impl CardSet {
     const SF_SCORE: i32 = 2_000_000_000;
-    const QUADS_SCORE: i32 = 1800_000_000;
-    const FH_SCORE: i32 = 1600_000_000;
-    const FLUSH_SCORE: i32 = 1400_000_000;
-    const STRAIGHT_SCORE: i32 = 1200_000_000;
+    const QUADS_SCORE: i32 = 1_800_000_000;
+    const FH_SCORE: i32 = 1_600_000_000;
+    const FLUSH_SCORE: i32 = 1_400_000_000;
+    const STRAIGHT_SCORE: i32 = 1_200_000_000;
     const THREE_OF_KIND_SCORE: i32 = 1_000_000_000;
     const TWO_PAIR_SCORE: i32 = 800_000_000;
     const PAIR_SCORE: i32 = 600_000_000;
@@ -385,6 +385,7 @@ impl CardSet {
 
     const MASKS_TOTAL: usize = 1 << 13; // 8192
 
+    #[allow(clippy::type_complexity)]
     const TABLES: (
         [Option<i32>; Self::MASKS_TOTAL],
         [u16; Self::MASKS_TOTAL],

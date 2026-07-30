@@ -111,7 +111,6 @@ pub fn play_from(gs: &mut GameState) -> AppliedAction {
 
     let (choice, probability) = match policy_root.actions.as_ref().expect("root should not be terminal") {
         Actions::Even(actions) => rng.choose_action(&actions.probs),
-
         Actions::Behind(actions) => rng.choose_action(&actions.probs),
     };
 
@@ -268,9 +267,7 @@ impl Parseable for Hand {
     fn parse(s: &str) -> Self {
         assert_eq!(s.len(), 4, "invalid hand. expected two cards e.g. 'AsAd'",);
         let (first_card, second_card) = s.split_at(2);
-        let hand = (Card::parse(first_card), Card::parse(second_card));
-
-        hand
+        (Card::parse(first_card), Card::parse(second_card))
     }
 }
 
@@ -311,7 +308,7 @@ impl Parseable for ChipState {
     }
 }
 
-const INSPECT_RANGES: bool = true;
+const INSPECT_RANGES: bool = false;
 
 pub fn hand_loop() {
     println!("INFO waiting to receive chip state after blinds (sb [stack] [bet] bb [stack] [bet])");

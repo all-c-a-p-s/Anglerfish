@@ -1,6 +1,7 @@
 module PlayHuman (runHumanMatch) where
 
 import Control.Exception (finally)
+import Control.Monad (when)
 import Data.Char (toLower)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Word
@@ -125,17 +126,15 @@ nextHumanDecision m isPreflop engine pos t
             otherPos == enginePosition m
 
           notifyOther message =
-            if otherIsEngine && stackFor otherPos t > 0
-              then send engine message
-              else pure ()
+            when (otherIsEngine && stackFor otherPos t > 0) $
+              send engine message
 
-          continue u =
+          continue =
             nextHumanDecision
               m
               isPreflop
               engine
               otherPos
-              u
 
           bettingClosedByAllIn u =
             stackFor otherPos t == 0
@@ -375,7 +374,7 @@ runHumanMatch = do
         floor (t * 1000000) :: Word64
 
       pos =
-        if seed `mod` 2 == 0
+        if even seed
           then SmallBlind
           else BigBlind
 

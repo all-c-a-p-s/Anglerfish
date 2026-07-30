@@ -1,7 +1,7 @@
 module Runner where
 
 import Control.Exception (finally)
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Word
 import Game
@@ -94,9 +94,9 @@ waitForDecision engine = do
 
   case words line of
     "DECISION" : "chose" : "action" : action : "with" : "probability" : p : _ ->
-      pure ((parseAction action), Just p)
+      pure (parseAction action, Just p)
     "DECISION" : "chose" : "action" : action : _ ->
-      pure ((parseAction action), Nothing)
+      pure (parseAction action, Nothing)
     _ ->
       waitForDecision engine
 
@@ -282,14 +282,13 @@ nextDecision m isPreflop sbEngine bbEngine pos t
               when (stackFor otherPos t > 0) $
                 send otherEngine message
 
-            continue u =
+            continue =
               nextDecision
                 m
                 isPreflop
                 sbEngine
                 bbEngine
                 otherPos
-                u
 
             bettingClosedByAllIn u =
               stackFor otherPos t == 0
@@ -305,7 +304,7 @@ nextDecision m isPreflop sbEngine bbEngine pos t
 
         (dec, p) <- waitForDecision player
 
-        when (not (legal t dec)) $
+        unless (legal t dec) $
           error ("illegal action: " ++ show dec)
 
         let playerMove =
@@ -590,19 +589,19 @@ runSeries n = do
               putStrLn (replicate 50 '/')
               putStrLn (replicate 50 '/')
               putStrLn ""
-              putStrLn ("STARTING MATCH " ++ (show matchNum) ++ " of " ++ show (matchesToPlay s))
+              putStrLn ("STARTING MATCH " ++ show matchNum ++ " of " ++ show (matchesToPlay s))
               putStrLn ""
               result <- runMatch
               case result of
                 FirstWins -> do
                   putStrLn ("First player (" ++ firstPath ++ ") wins match " ++ show (firstWins s + secondWins s + 1))
-                  putStrLn ("Score is " ++ show ((firstWins s) + 1) ++ "-" ++ show (secondWins s))
+                  putStrLn ("Score is " ++ show (firstWins s + 1) ++ "-" ++ show (secondWins s))
                   putStrLn (replicate 50 '/')
                   putStrLn (replicate 50 '/')
                   nextMatch s {firstWins = firstWins s + 1}
                 SecondWins -> do
                   putStrLn ("Second player (" ++ secondPath ++ ") wins match " ++ show (firstWins s + secondWins s + 1))
-                  putStrLn ("Score is " ++ show (firstWins s) ++ "-" ++ show ((secondWins s) + 1))
+                  putStrLn ("Score is " ++ show (firstWins s) ++ "-" ++ show (secondWins s + 1))
                   putStrLn (replicate 50 '/')
                   putStrLn (replicate 50 '/')
                   nextMatch s {secondWins = secondWins s + 1}
@@ -628,7 +627,7 @@ runMatch = do
       seed = floor (t * 1000000) :: Word64
 
       pos =
-        if seed `mod` 2 == 0
+        if even seed
           then SmallBlind
           else BigBlind
 

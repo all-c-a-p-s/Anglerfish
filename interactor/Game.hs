@@ -138,8 +138,8 @@ getOutcome :: Match -> Outcome
 getOutcome x =
   case (sbStack (state x), bbStack (state x)) of
     (0, 0) -> error "both somehow have stack of zero after hand"
-    (0, y) -> if (firstPos x) == SmallBlind then SecondWins else FirstWins
-    (y, 0) -> if (firstPos x) == SmallBlind then FirstWins else SecondWins
+    (0, y) -> if firstPos x == SmallBlind then SecondWins else FirstWins
+    (y, 0) -> if firstPos x == SmallBlind then FirstWins else SecondWins
     _ -> Ongoing
 
 -- series of `matches_to_play` matches
@@ -292,7 +292,7 @@ score x =
                                 kickers = topN rest 2
                              in threeOfKindScore + firstScore * top + fromIntegral kickers
                           (2, 2) ->
-                            let rest = allSuits .&. complement ((shiftL 1 top) .|. (shiftL 1 second))
+                            let rest = allSuits .&. complement (shiftL 1 top .|. shiftL 1 second)
                                 kicker = topN rest 1
                              in twoPairScore + firstScore * top + secondScore * second + fromIntegral kicker
                           (2, _) ->

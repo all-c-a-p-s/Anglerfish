@@ -21,7 +21,7 @@ main = do
       putStrLn ""
       putStrLn ""
 
-      putStrLn ("FINAL RESULT:")
+      putStrLn "FINAL RESULT:"
       putStrLn
         ( "("
             ++ firstPath

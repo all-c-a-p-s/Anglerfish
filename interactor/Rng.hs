@@ -25,10 +25,10 @@ swap i j l =
 
 shuffle :: [a] -> Word64 -> [a]
 shuffle [] _ = []
-shuffle (x : []) _ = [x]
+shuffle [x] _ = [x]
 shuffle list state =
   let r = next state
-      i = (fromIntegral r) `mod` (length list)
+      i = fromIntegral r `mod` length list
       l1 = swap 0 i list
    in case l1 of
         y : ys -> y : shuffle ys r
